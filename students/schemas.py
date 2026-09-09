@@ -16,3 +16,8 @@ class StudentProfileOutSchema(Schema):
     skills: List[str]
     placement_status: str
     github_score: float
+
+class ResumeUploadOutSchema(Schema):
+    success: bool 
+    message: str 
+    raw_text: str 

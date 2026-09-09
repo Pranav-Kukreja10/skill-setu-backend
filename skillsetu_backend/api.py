@@ -9,7 +9,7 @@ from students.api import router as students_router
 api = NinjaAPI(
     title="Skill Setu API",
     version="1.0.0",
-    docs_url="/api/v1/docs"
+    docs_url="/docs"
 )
 
 # ----------------- SCHEMAS & MOCK ROUTERS (Keep only the Recruiters/Listings stubs) -----------------
