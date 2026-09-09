@@ -32,6 +32,7 @@ class StudentProfile(models.Model):
     class PlacementStatus(models.TextChoices):
         UNPLACED = 'UNPLACED', 'Unplaced'
         PLACED = 'PLACED', 'Placed'
+   
         OPEN_TO_INTERN = 'OPEN_TO_INTERN', 'Open to Internships'
 
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='student_profile')

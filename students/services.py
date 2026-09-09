@@ -68,12 +68,19 @@ def generate_role_fit_matrix(extracted_skills: list) -> dict:
     """
     Generates the multi-role fitment scores dynamically using 
     active database benchmarks stored in PostgreSQL.
+    
+    Filters out any role where the candidate has a <= 5% match,
+    ensuring only relevant branch/career options are displayed.
     """
     matrix = {}
     benchmarks = JobBenchmark.objects.select_related('sector').all()
     
     for benchmark in benchmarks:
         score = calculate_role_score(extracted_skills, benchmark)
+        
+        # UX FILTER: Skip displaying completely irrelevant career paths (e.g., 0% matches)
+        if score <= 5:
+            continue
         
         if score >= 75:
             fit_level = "High Match"
@@ -89,3 +96,4 @@ def generate_role_fit_matrix(extracted_skills: list) -> dict:
             "verified_confidence_score": None  # Will be populated when they pass the dynamic test
         }
     return matrix
+
