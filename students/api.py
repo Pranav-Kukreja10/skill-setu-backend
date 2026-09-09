@@ -5,7 +5,7 @@ from django.shortcuts import get_object_or_404
 from students.models import StudentProfile
 from students.services import extract_text_from_file, generate_role_fit_matrix
 from students.ai_gateway import AIGateway  # <--- IMPORT THE GATEWAY HERE
-from students.schemas import StudentProfileInSchema, StudentProfileOutSchema, ResumeUploadOutSchema, ResumeAnalysisInSchema
+from students.schemas import StudentProfileInSchema, StudentProfileOutSchema, ResumeUploadOutSchema, ResumeAnalysisInSchema, TestGenerationOutSchema, QuestionOutSchema
 from accounts.security import JWTAuth
 
 # Protect all routes inside this domain with our verified JWTAuth bearer token
@@ -122,3 +122,43 @@ def update_my_profile(request, payload: StudentProfileInSchema):
         "overall_confidence_score": profile.overall_confidence_score,
         "is_verified": profile.is_verified,
     }
+
+@router.get("/generate-test", response={200: TestGenerationOutSchema, 400: dict})
+def get_student_screening_test(request, role_title: str):
+    """
+    Generates a personalized, progressive 5-question technical screening test
+    tailored to the student's resume profile and target career path.
+    """
+    profile = get_object_or_404(StudentProfile, user=request.auth)
+    
+    if not profile.skills:
+        return 400, {
+            "message": "Your profile has no extracted skills. Please upload and parse your resume first."
+        }
+        
+    try:
+        # Trigger our Unified AIGateway adaptive generation engine
+        test_session = AIGateway.generate_adaptive_test(
+            role_title=role_title,
+            skills=profile.skills,
+            projects=profile.projects
+        )
+        
+        # Strip correct answers and grading rubrics before sending the payload to the client
+        secured_questions = []
+        for q in test_session["questions"]:
+            secured_questions.append({
+                "id": q["id"],
+                "question_text": q["question_text"],
+                "type": q["type"],
+                "difficulty": q["difficulty"],
+                "options": q.get("options")
+            })
+            
+        return 200, {
+            "role_title": test_session["role_title"],
+            "questions": secured_questions,
+            "test_session_token": test_session["test_session_token"]
+        }
+    except Exception as e:
+        return 400, {"message": f"Test Generation Failure: {str(e)}"}

@@ -25,3 +25,18 @@ class StudentProfileOutSchema(Schema):
 
 class ResumeAnalysisInSchema(Schema):
     raw_text: str
+
+
+class QuestionOutSchema(Schema):
+    id: int
+    question_text: str
+    type: str  # "MCQ" or "VIVA"
+    difficulty: str  # "EASY", "MEDIUM", "HARD"
+    options: Optional[List[str]] = None  # Only populated for MCQ
+    # We do NOT send the correct_answer to the frontend to prevent client-side inspection/cheating!
+
+class TestGenerationOutSchema(Schema):
+    role_title: str
+    questions: List[QuestionOutSchema]
+    # We return an encrypted or obfuscated session key containing the correct answers and grading rubrics
+    test_session_token: str 
