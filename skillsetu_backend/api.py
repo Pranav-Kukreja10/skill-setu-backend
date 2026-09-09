@@ -2,30 +2,17 @@
 from ninja import NinjaAPI, Router, Schema
 from typing import List, Optional
 
+# 1. IMPORT THE REAL ROUTERS HERE
+from accounts.api import router as accounts_router
+from students.api import router as students_router
+
 api = NinjaAPI(
     title="Skill Setu API",
     version="1.0.0",
     docs_url="/docs"
 )
 
-# ----------------- SCHEMAS -----------------
-
-class TokenOut(Schema):
-    access_token: str
-    token_type: str = "bearer"
-    role: str
-
-class LoginIn(Schema):
-    username: str
-    password: str
-
-class StudentOut(Schema):
-    id: int
-    name: str
-    email: str
-    skills: List[str]
-    github_handle: Optional[str] = None
-    placement_status: str
+# ----------------- SCHEMAS & MOCK ROUTERS (Keep only the Recruiters/Listings stubs) -----------------
 
 class RecruiterOut(Schema):
     id: int
@@ -41,61 +28,26 @@ class ListingOut(Schema):
     required_skills: List[str]
     stipend: Optional[str] = None
 
-# ----------------- ROUTERS -----------------
-
-auth_router = Router(tags=["Authentication"])
-students_router = Router(tags=["Students"])
 recruiters_router = Router(tags=["Recruiters"])
 listings_router = Router(tags=["Listings"])
 
-@auth_router.post("/login", response=TokenOut)
-def login_stub(request, payload: LoginIn):
-    return {
-        "access_token": "mock-jwt-token-xyz",
-        "token_type": "bearer",
-        "role": "student"
-    }
-
-@students_router.get("/", response=List[StudentOut])
-def list_students_stub(request):
-    return [
-        {
-            "id": 1,
-            "name": "Alex Dev",
-            "email": "alex@university.edu",
-            "skills": ["Python", "React", "Docker"],
-            "github_handle": "alexdev",
-            "placement_status": "unplaced"
-        }
-    ]
-
 @recruiters_router.get("/", response=List[RecruiterOut])
 def list_recruiters_stub(request):
-    return [
-        {
-            "id": 101,
-            "company_name": "Acme Innovations",
-            "industry": "Enterprise Software",
-            "contact_email": "talent@acme.example"
-        }
-    ]
+    return [{"id": 101, "company_name": "Acme Innovations", "industry": "Enterprise Software", "contact_email": "talent@acme.example"}]
 
 @listings_router.get("/", response=List[ListingOut])
 def list_listings_stub(request):
-    return [
-        {
-            "id": 501,
-            "title": "Backend Engineering Intern",
-            "company_name": "Acme Innovations",
-            "role_type": "Internship",
-            "required_skills": ["Python", "Django", "PostgreSQL"],
-            "stipend": "INR 25,000/month"
-        }
-    ]
+    return [{"id": 501, "title": "Backend Engineering Intern", "company_name": "Acme Innovations", "role_type": "Internship", "required_skills": ["Python", "Django", "PostgreSQL"], "stipend": "INR 25,000/month"}]
 
-# ----------------- REGISTER -----------------
 
-api.add_router("/auth", auth_router)
+# ----------------- REGISTER ROUTERS -----------------
+
+# 2. REGISTER THE REAL ACCOUNTS ROUTER (This contains both /login and /register)
+api.add_router("/auth", accounts_router)
+
+# Register the real students router
 api.add_router("/students", students_router)
+
+# Register the remaining mocks
 api.add_router("/recruiters", recruiters_router)
 api.add_router("/listings", listings_router)
