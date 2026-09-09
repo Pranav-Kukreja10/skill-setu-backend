@@ -70,3 +70,8 @@ class TestGradingOutSchema(Schema):
     viva_average: int
     confidence_score: int
     feedback_log: List[FeedbackDetailSchema]
+
+class StudentAnswerInSchema(Schema):
+    id: int
+    answer_text: str
+    time_taken_seconds: Optional[int] = 15  
