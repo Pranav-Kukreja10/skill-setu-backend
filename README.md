@@ -206,3 +206,6 @@ Refer to the Swagger documentation for available routes, request bodies, and res
 
 *Note Frontend and backend must run together to Show the following output: 
 
+<img width="1919" height="987" alt="image" src="https://github.com/user-attachments/assets/5d0a653d-de0e-4bc7-9bf1-f2ab4894e0d4" />
+
+
