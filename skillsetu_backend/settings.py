@@ -50,6 +50,7 @@ INSTALLED_APPS = [
 
     #Our Installed Apps: 
     'accounts',
+    'students',
 ]
 
 MIDDLEWARE = [
