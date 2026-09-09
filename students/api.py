@@ -2,10 +2,19 @@ from ninja import Router, File
 from ninja.files import UploadedFile
 from typing import List
 from django.shortcuts import get_object_or_404
-from students.models import StudentProfile
+from students.models import StudentProfile, TestSession
 from students.services import extract_text_from_file, generate_role_fit_matrix
-from students.ai_gateway import AIGateway  # <--- IMPORT THE GATEWAY HERE
-from students.schemas import StudentProfileInSchema, StudentProfileOutSchema, ResumeUploadOutSchema, ResumeAnalysisInSchema, TestGenerationOutSchema, QuestionOutSchema
+from students.ai_gateway import AIGateway
+from students.schemas import (
+    StudentProfileInSchema, 
+    StudentProfileOutSchema, 
+    ResumeUploadOutSchema, 
+    ResumeAnalysisInSchema, 
+    TestGenerationOutSchema, 
+    TestSubmissionInSchema, 
+    TestGradingOutSchema
+)
+from students.grader import ResilientGrader
 from accounts.security import JWTAuth
 
 # Protect all routes inside this domain with our verified JWTAuth bearer token
@@ -48,24 +57,19 @@ def analyze_student_resume(request, payload: ResumeAnalysisInSchema):
         return 400, {"message": "No raw text provided for analysis."}
         
     try:
-        # 1. Trigger the Unified AI Gateway (Automatically routes based on .env)
         analysis_result = AIGateway.extract_skills_and_projects(raw_text)
         extracted_skills = analysis_result.get("skills", [])
         
-        # 2. Get the student's database profile (linked to the authenticated user)
         profile, created = StudentProfile.objects.get_or_create(user=request.auth)
         
-        # 3. Calculate dynamic industry fit matrix
         fit_matrix = generate_role_fit_matrix(extracted_skills)
         
-        # 4. Save results to PostgreSQL fields
         profile.skills = extracted_skills
         profile.projects = analysis_result.get("projects", [])
         profile.role_fit_matrix = fit_matrix
         profile.bio = f"Auto-extracted {len(extracted_skills)} skills and {len(analysis_result.get('projects', []))} projects."
         profile.save()
         
-        # Return populated profile matching StudentProfileOutSchema
         return 200, {
             "id": profile.id,
             "username": request.auth.username,
@@ -79,6 +83,100 @@ def analyze_student_resume(request, payload: ResumeAnalysisInSchema):
         }
     except Exception as e:
         return 400, {"message": f"AI Parsing/Sync Failure: {str(e)}"}
+
+@router.get("/generate-test", response={200: TestGenerationOutSchema, 400: dict})
+def get_student_screening_test(request, role_title: str):
+    """
+    Generates a personalized, progressive 5-question technical screening test
+    tailored to the student's resume profile, and saves the session in PostgreSQL.
+    """
+    profile = get_object_or_404(StudentProfile, user=request.auth)
+    
+    if not profile.skills:
+        return 400, {
+            "message": "Your profile has no extracted skills. Please upload and parse your resume first."
+        }
+        
+    try:
+        test_session = AIGateway.generate_adaptive_test(
+            role_title=role_title,
+            skills=profile.skills,
+            projects=profile.projects
+        )
+        
+        db_session = TestSession.objects.create(
+            student_profile=profile,
+            target_role=role_title,
+            questions_data=test_session["questions"]
+        )
+        
+        secured_questions = []
+        for q in test_session["questions"]:
+            secured_questions.append({
+                "id": q["id"],
+                "question_text": q["question_text"],
+                "type": q["type"],
+                "difficulty": q["difficulty"],
+                "options": q.get("options")
+            })
+            
+        return 200, {
+            "role_title": role_title,
+            "session_id": db_session.id,
+            "questions": secured_questions
+        }
+    except Exception as e:
+        return 400, {"message": f"Test Generation Failure: {str(e)}"}
+
+@router.post("/submit-test", response={200: TestGradingOutSchema, 400: dict})
+def submit_student_screening_test(request, data: TestSubmissionInSchema):
+    """
+    Submits, grades, and verifies a student's completed screening test using database-backed sessions.
+    """
+    profile = get_object_or_404(StudentProfile, user=request.auth)
+    
+    db_session = get_object_or_404(TestSession, id=data.session_id, student_profile=profile)
+    
+    if db_session.is_completed:
+        return 400, {"message": "This test session has already been completed and graded."}
+    
+    role_fit_data = profile.role_fit_matrix.get(data.target_role)
+    if not role_fit_data:
+        return 400, {"message": f"You do not have a parsed resume score for the role: {data.target_role}"}
+        
+    resume_rating = float(role_fit_data.get("score", 0))
+
+    try:
+        submitted_answers = [{"id": ans.id, "answer_text": ans.answer_text} for ans in data.answers]
+        
+        grading_result = ResilientGrader.evaluate_test_submission(
+            submitted_answers=submitted_answers,
+            original_questions=db_session.questions_data,
+            resume_rating=resume_rating
+        )
+        
+        role_fit_data["verified_confidence_score"] = grading_result["confidence_score"]
+        profile.role_fit_matrix[data.target_role] = role_fit_data
+        profile.overall_confidence_score = grading_result["confidence_score"]
+        
+        if grading_result["confidence_score"] >= 60:
+            profile.is_verified = True
+            
+        profile.save()
+        
+        db_session.is_completed = True
+        db_session.save()
+
+        return 200, {
+            "success": True,
+            "cognitive_score": grading_result["cognitive_score"],
+            "mcq_average": grading_result["mcq_average"],
+            "viva_average": grading_result["viva_average"],
+            "confidence_score": grading_result["confidence_score"],
+            "feedback_log": grading_result["feedback_log"]
+        }
+    except Exception as e:
+        return 400, {"message": f"Grading Engine Failure: {str(e)}"}
 
 @router.get("/", response=List[StudentProfileOutSchema])
 def list_students(request):
@@ -122,43 +220,3 @@ def update_my_profile(request, payload: StudentProfileInSchema):
         "overall_confidence_score": profile.overall_confidence_score,
         "is_verified": profile.is_verified,
     }
-
-@router.get("/generate-test", response={200: TestGenerationOutSchema, 400: dict})
-def get_student_screening_test(request, role_title: str):
-    """
-    Generates a personalized, progressive 5-question technical screening test
-    tailored to the student's resume profile and target career path.
-    """
-    profile = get_object_or_404(StudentProfile, user=request.auth)
-    
-    if not profile.skills:
-        return 400, {
-            "message": "Your profile has no extracted skills. Please upload and parse your resume first."
-        }
-        
-    try:
-        # Trigger our Unified AIGateway adaptive generation engine
-        test_session = AIGateway.generate_adaptive_test(
-            role_title=role_title,
-            skills=profile.skills,
-            projects=profile.projects
-        )
-        
-        # Strip correct answers and grading rubrics before sending the payload to the client
-        secured_questions = []
-        for q in test_session["questions"]:
-            secured_questions.append({
-                "id": q["id"],
-                "question_text": q["question_text"],
-                "type": q["type"],
-                "difficulty": q["difficulty"],
-                "options": q.get("options")
-            })
-            
-        return 200, {
-            "role_title": test_session["role_title"],
-            "questions": secured_questions,
-            "test_session_token": test_session["test_session_token"]
-        }
-    except Exception as e:
-        return 400, {"message": f"Test Generation Failure: {str(e)}"}

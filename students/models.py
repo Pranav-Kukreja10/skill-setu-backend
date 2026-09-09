@@ -65,3 +65,14 @@ class StudentProfile(models.Model):
 def create_student_profile(sender, instance, created, **kwargs):
     if created and instance.role == 'STUDENT':
         StudentProfile.objects.get_or_create(user=instance)
+
+class TestSession(models.Model):
+    student_profile = models.ForeignKey(StudentProfile, on_delete=models.CASCADE, related_name="test_sessions")
+    target_role = models.CharField(max_length=100)
+    questions_data = models.JSONField(help_text="Stores the full generated test, correct answers, and rubrics")
+    is_completed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'skillsetu_test_sessions'
+
