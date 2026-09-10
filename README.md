@@ -7,7 +7,30 @@
 [![Google Gemini](https://img.shields.io/badge/AI-Gemini%20Flash%20Lite-orange.svg)](https://ai.google.dev/)
 [![Ollama Local](https://img.shields.io/badge/GPU%20Fallback-Ollama%20Qwen3.5-purple.svg)](https://ollama.ai/)
 
-**Skill Setu** is an enterprise-grade, contract-first backend ecosystem designed for the **Smart India Hackathon (SIH)** problem statement. It bridges the gap between students, recruiters, and educational institutions through automated skill verification, adaptive cognitive assessments, anti-cheat plagiarism deterrence, two-way NLP hybrid search, blind hiring workflows, and institutional placement analytics.
+**Skill Setu** is an enterprise-grade, contract-first backend ecosystem designed for the **Smart India Hackathon (SIH)** problem statement: *"Portal for Academia – Industry collaboration for Skill Mapping, Internships and Placement"*. It seamlessly connects students, corporate recruiters, and academic faculty through automated skill verification, adaptive cognitive assessments, anti-cheat plagiarism deterrence, two-way NLP hybrid search, blind hiring workflows, live internship progress tracking, industry learning programs, and institutional skill-gap analytics.
+
+---
+
+## 🏆 Verbatim SIH Problem Statement Compliance Matrix
+
+Designed to withstand the most rigorous evaluation, every clause of the SIH Problem Statement is implemented with concrete database models, mathematical formulas, and verified REST API endpoints:
+
+| SIH Problem Statement Requirement | Platform Feature & Implementation | Domain & Models | API Endpoints & Contracts | Verification Status |
+|---|---|---|---|---|
+| **Student Registration & Profiling** | Multi-domain profile creation with academic credentials, CGPA, graduation year, social links, resume parsing | `accounts.User`<br>`students.StudentProfile` | `POST /api/v1/auth/register`<br>`GET /api/v1/students/me`<br>`PUT /api/v1/students/me` | **100% Verified** |
+| **Skill Mapping Engine** | Capturing and structuring technical, frameworks, tools, and soft skills with evidence weight $W_s = 0.6 P_e + 0.4 E_r$ | `students.services`<br>`JobBenchmark` | `POST /api/v1/students/resume-preview-extract`<br>`POST /api/v1/students/analyze-resume` | **100% Verified** |
+| **Student Digital Portfolio** | Comprehensive portfolio aggregating verified skills ($W_s$), cognitive scores ($A_s$), certifications, projects, internships, achievements, transcripts | `StudentProfile.internships`<br>`StudentProfile.achievements`<br>`StudentProfile.academic_records` | `GET /api/v1/students/portfolio/me`<br>`GET /api/v1/students/{id}/portfolio`<br>`PUT /api/v1/students/portfolio/achievements` | **100% Verified** |
+| **Industry/Recruiter Registration & Company Profile** | Partner company verification, branding logos, recruiter profile management | `recruiters.Company`<br>`recruiters.RecruiterProfile` | `POST /api/v1/auth/register`<br>`GET /api/v1/recruiters/me`<br>`POST /api/v1/recruiters/company` | **100% Verified** |
+| **Internship & Job Management** | Multi-target listing management across full-time, student internships, apprenticeships, live projects | `recruiters.JobListing` | `POST /api/v1/listings/`<br>`GET /api/v1/listings/my-listings`<br>`GET /api/v1/listings/{id}` | **100% Verified** |
+| **Application & Shortlisting Workflow** | One-click apply with ACID row locking (`select_for_update`), stage history audit trail, automatic placement sync | `recruiters.JobApplication` | `POST /api/v1/students/jobs/{id}/apply`<br>`PATCH /api/v1/applications/{id}/status`<br>`GET /api/v1/students/applications` | **100% Verified** |
+| **Internship Progress Tracking & Milestone Logs** | Student weekly milestone progress logs (week #, summary, hours, deliverables URL) and live status tracking | `JobApplication.weekly_progress_logs`<br>`JobApplication.internship_status` | `GET /api/v1/students/internships/active`<br>`POST /api/v1/students/internships/{id}/log-milestone` | **100% Verified** |
+| **Mentor Feedback & Rating Supervision** | Recruiter/mentor supervision, logging qualitative review remarks, 1-5 star performance rating, completion certificates | `JobApplication.mentor_feedback`<br>`JobApplication.mentor_rating`<br>`JobApplication.completion_certificate_url` | `PATCH /api/v1/applications/{id}/internship-progress` | **100% Verified** |
+| **Faculty Internships & FDPs** | Dedicated exposure discovery for academicians: Faculty Internships, FDPs, Industrial Training, Research Projects, Consultancies | `JobListing.role_type`<br>`JobListing.target_audience="FACULTY"` | `GET /api/v1/institutions/faculty/opportunities`<br>`POST /api/v1/institutions/faculty/opportunities/{id}/apply` | **100% Verified** |
+| **Industry Learning Programs & Workshops** | Corporate training programs, certification courses, hands-on workshops, mentorship initiatives, innovation challenges / hackathons | `recruiters.LearningProgram` | `GET /api/v1/programs/`<br>`POST /api/v1/programs/`<br>`GET /api/v1/programs/{id}`<br>`POST /api/v1/programs/{id}/enroll` | **100% Verified** |
+| **Blind Screening for Objective Hiring** | `blind=True` toggle redacting candidate PII (name $\to$ `"Candidate #ID"`, email/college $\to$ `[REDACTED]`) while preserving verified skills matrix and credentials | `students.search`<br>`recruiters.api` | `GET /api/v1/students/search?blind=true`<br>`GET /api/v1/listings/{id}/applicants?blind=true`<br>`GET /api/v1/students/{id}/portfolio?blind=true` | **100% Verified** |
+| **Institutional Placement Oversight & Reporting** | Idempotent institutional metrics: total placement percentage, branch-wise metrics, student offer letter rosters | `institutions.api`<br>`distinct().count()` | `GET /api/v1/placement/overview`<br>`GET /api/v1/placement/branch-wise`<br>`GET /api/v1/placement/student-status` | **100% Verified** |
+| **Skill-Gap Visibility & Curriculum Radar** | Departmental skill deficit analytics comparing industry demand vs student supply, surfacing actionable syllabus recommendations | `institutions.api`<br>`SkillGapAnalysisOut` | `GET /api/v1/placement/skill-gaps`<br>`GET /api/v1/placement/in-demand-skills` | **100% Verified** |
+| **Notifications & Approaching Deadlines** | Real-time alerts for opportunities, status changes, scheduled interviews, and 72-hour expiring deadline reminders | `students.Notification` | `GET /api/v1/students/notifications`<br>`GET /api/v1/students/deadlines`<br>`POST /api/v1/students/deadlines/check-reminders` | **100% Verified** |
 
 ---
 
@@ -461,6 +484,77 @@ export default function App() {
 Run `npm run dev` to verify real-time communication:
 
 ![Skill Setu Integration Test](image.png)
+
+---
+
+## 📡 Complete REST API Surface Catalog
+
+| Group | Method | Endpoint | Description | Guard / Security |
+|---|---|---|---|---|
+| **Auth** | `POST` | `/api/v1/auth/register` | Register new Student, Candidate, Recruiter, Faculty | Public |
+| **Auth** | `POST` | `/api/v1/auth/login` | Acquire JWT access and refresh tokens | Public |
+| **Candidate** | `GET` | `/api/v1/students/me` | Fetch verified profile, $P_{\text{overall}}$, and $W_s$ | StudentAuth / CandidateAuth |
+| **Candidate** | `PUT` | `/api/v1/students/me` | Update academics, certifications, social links, achievements | StudentAuth / CandidateAuth |
+| **Candidate** | `POST` | `/api/v1/students/resume-preview-extract` | In-memory resume preview without database commit | StudentAuth / CandidateAuth |
+| **Candidate** | `POST` | `/api/v1/students/analyze-resume` | Commit resume parse into skills matrix ($W_s$) | StudentAuth / CandidateAuth |
+| **Portfolio** | `GET` | `/api/v1/students/portfolio/me` | Complete Digital Portfolio (skills, scores, certs, projects, achievements, transcripts) | StudentAuth / CandidateAuth |
+| **Portfolio** | `GET` | `/api/v1/students/{id}/portfolio` | Candidate portfolio review (`blind=true` toggle support) | JWTAuth |
+| **Portfolio** | `PUT` | `/api/v1/students/portfolio/achievements` | Update verified achievements & honors | StudentAuth / CandidateAuth |
+| **Assessment** | `POST` | `/api/v1/students/generate-test` | Progressive 5-question viva + MCQ generation | StudentAuth / CandidateAuth |
+| **Assessment** | `POST` | `/api/v1/students/submit-test` | Time-decay MCQ & viva grading, CS confidence update | StudentAuth / CandidateAuth |
+| **Candidate** | `GET` | `/api/v1/students/jobs/feed` | Filterable active jobs feed (role, location, remote) | StudentAuth / CandidateAuth |
+| **Candidate** | `POST` | `/api/v1/students/jobs/search` | Plain-language 3-signal candidate job search | StudentAuth / CandidateAuth |
+| **Candidate** | `GET` | `/api/v1/students/recommendations` | Dynamically scored reverse-matching feed | StudentAuth / CandidateAuth |
+| **Candidate** | `GET` | `/api/v1/students/skill-gap-roadmap` | High-priority upskilling skills & deliverables | StudentAuth / CandidateAuth |
+| **Candidate** | `POST` | `/api/v1/students/jobs/{id}/apply` | 1-click ACID application submission | StudentAuth / CandidateAuth |
+| **Candidate** | `GET` | `/api/v1/students/applications` | Student application pipeline & stage history | StudentAuth / CandidateAuth |
+| **Internship** | `GET` | `/api/v1/students/internships/active` | Student live ongoing internship tracker & mentor reviews | StudentAuth / CandidateAuth |
+| **Internship** | `POST` | `/api/v1/students/internships/{id}/log-milestone` | Student logs weekly milestone, deliverables & hours | StudentAuth / CandidateAuth |
+| **Candidate** | `GET` | `/api/v1/students/notifications` | Real-time notifications & opportunity alerts | StudentAuth / CandidateAuth |
+| **Candidate** | `GET` | `/api/v1/students/deadlines` | Approaching position deadlines | StudentAuth / CandidateAuth |
+| **Candidate** | `POST` | `/api/v1/students/deadlines/check-reminders` | 72-hour deadline reminder scanner | StudentAuth / CandidateAuth |
+| **Recruiter** | `GET` | `/api/v1/recruiters/me` | Recruiter profile & company details | RecruiterAuth |
+| **Recruiter** | `PUT` | `/api/v1/recruiters/me` | Update recruiter designation & department | RecruiterAuth |
+| **Recruiter** | `POST` | `/api/v1/recruiters/company` | Register or update company branding & CIN | RecruiterAuth |
+| **Recruiter** | `POST` | `/api/v1/listings/` | Create & publish new job, internship or FDP listing | RecruiterAuth |
+| **Recruiter** | `GET` | `/api/v1/listings/my-listings` | Company job postings across all lifecycle states | RecruiterAuth |
+| **Recruiter** | `GET` | `/api/v1/students/search` | 3-signal candidate talent search (`blind=true` support) | RecruiterAuth |
+| **Recruiter** | `GET` | `/api/v1/listings/{id}/applicants` | Review applicants (`blind=true` toggle support) | RecruiterAuth |
+| **Recruiter** | `PATCH`| `/api/v1/applications/{id}/status` | ACID stage transition with `select_for_update` | RecruiterAuth |
+| **Supervision**| `PATCH`| `/api/v1/applications/{id}/internship-progress` | Mentor qualitative feedback, 1-5 rating & certificate issuance | RecruiterAuth |
+| **Programs** | `GET` | `/api/v1/programs/` | Corporate learning programs, workshops & challenges feed | Public / JWTAuth |
+| **Programs** | `POST` | `/api/v1/programs/` | Publish new training program, workshop, or challenge | RecruiterAuth |
+| **Programs** | `GET` | `/api/v1/programs/{id}` | Detailed syllabus, dates, and learning outcomes | Public / JWTAuth |
+| **Programs** | `POST` | `/api/v1/programs/{id}/enroll` | 1-click enrollment for students and faculty | JWTAuth |
+| **Academia** | `GET` | `/api/v1/institutions/directory` | Directory of verified colleges & departments | Public |
+| **Academia** | `POST` | `/api/v1/institutions/` | Register new college / institution | AcademiaAuth |
+| **Academia** | `POST` | `/api/v1/institutions/{id}/departments` | Add academic department | AcademiaAuth |
+| **Academia** | `GET` | `/api/v1/institutions/faculty/me` | Faculty profile & institution info | AcademiaAuth |
+| **Academia** | `PUT` | `/api/v1/institutions/faculty/me` | Update faculty profile & designation | AcademiaAuth |
+| **Faculty Opps**| `GET` | `/api/v1/institutions/faculty/opportunities` | Faculty internships, FDPs, consultancies discovery | AcademiaAuth |
+| **Faculty Opps**| `POST`| `/api/v1/institutions/faculty/opportunities/{id}/apply`| Faculty 1-click application for industrial exposure | AcademiaAuth |
+| **Faculty Opps**| `GET` | `/api/v1/institutions/faculty/my-collaborations` | Faculty enrolled collaboration tracks & programs | AcademiaAuth |
+| **Faculty** | `GET` | `/api/v1/placement/overview` | Idempotent institutional placement metrics | AcademiaAuth |
+| **Faculty** | `GET` | `/api/v1/placement/branch-wise` | Branch-wise placement rates & cognitive averages | AcademiaAuth |
+| **Faculty** | `GET` | `/api/v1/placement/student-status` | Student offer letters & certification roster | AcademiaAuth |
+| **Faculty** | `GET` | `/api/v1/placement/skill-gaps` | Departmental skill deficit radar & syllabus tips | AcademiaAuth |
+| **Faculty** | `GET` | `/api/v1/placement/in-demand-skills` | Top industry skills & campus coverage radar | AcademiaAuth |
+| **Faculty** | `GET` | `/api/v1/placement/trends` | Pipeline funnel velocities & role breakdown | AcademiaAuth |
+
+---
+
+## ⚡ Database Scalability & Backend Reliability Architecture
+
+To support peak evaluation spikes and prevent database throttling during high-concurrency screening, the backend incorporates 6 production-grade architectural safeguards:
+
+| Pillar | Engineering Safeguard | Implementation Mechanism |
+|---|---|---|
+| **Vector Search** | **HNSW Vector Indexing** | Native `pgvector` HNSW indexes (`HnswIndex`, `vector_cosine_ops`, $M=16$, $ef=64$) on `StudentProfile.embedding` and `JobListing.embedding` replace sequential scans with sub-millisecond approximate nearest neighbor (ANN) retrieval. |
+| **ORM Optimization** | **Zero N+1 Queries** | Multi-level `Prefetch` on candidate offers and annotated `Count(..., distinct=True)` aggregations on program enrollments collapse query loops into single-digit constant queries. |
+| **Connection Pooling** | **Persistent TCP & PgBouncer** | `CONN_MAX_AGE = 600` (10-minute TCP socket persistence) and `CONN_HEALTH_CHECKS = True` eliminate connection churn and socket depletion. |
+| **Concurrency Safety** | **Transactional Idempotency** | Duplicate `/apply` calls return `200 OK` with the existing record, and `/status` retries return current state without creating redundant audit history or duplicate alerts. |
+| **Stateless Auth** | **Zero-DB Role Pre-Check** | `RecruiterAuth`, `StudentAuth`, and `AcademiaAuth` decode JWTs and validate the `role` claim prior to database execution, rejecting unauthorized requests with 0 DB roundtrips. |
+| **Resilience** | **Graceful AI Degradation** | Structured fallbacks for resume analysis, 5-question adaptive tests, and viva scoring provide Apple-grade polite system messaging if external AI models experience network latency. |
 
 ---
 

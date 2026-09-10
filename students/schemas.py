@@ -38,8 +38,37 @@ class ResumePreviewOutSchema(Schema):
     target_roles: List[str] = []
     social_links: Dict[str, str] = {}
 
+# --- GRANULAR PREFERENCES & PERSONALISATION SCHEMAS ---
+
+class NotificationPreferencesSchema(Schema):
+    opportunity_alerts: bool = True
+    deadline_reminders: bool = True
+    scheme_alerts: bool = True
+    application_status_updates: bool = True
+
+class FeaturePreferencesSchema(Schema):
+    show_affirmative_action_schemes: bool = True
+    show_diversity_job_badges: bool = True
+    smart_roadmap_recommendations: bool = True
+    reverse_matching_radar: bool = True
+
+class PrivacyPreferencesSchema(Schema):
+    participate_in_diversity_hiring: bool = True
+    share_profile_with_verified_recruiters: bool = True
+
+class StudentPreferencesSchema(Schema):
+    notifications: NotificationPreferencesSchema = NotificationPreferencesSchema()
+    features: FeaturePreferencesSchema = FeaturePreferencesSchema()
+    privacy: PrivacyPreferencesSchema = PrivacyPreferencesSchema()
+
+class StudentPreferencesUpdateIn(Schema):
+    notifications: Optional[Dict[str, bool]] = None
+    features: Optional[Dict[str, bool]] = None
+    privacy: Optional[Dict[str, bool]] = None
+
 class StudentProfileInSchema(Schema):
     bio: Optional[str] = None
+    gender: Optional[str] = None
     current_designation: Optional[str] = None
     experience_years: Optional[float] = None
     institution: Optional[str] = None
@@ -55,12 +84,18 @@ class StudentProfileInSchema(Schema):
     skills_matrix: Optional[Dict[str, Any]] = None
     skills_categorized: Optional[Dict[str, Any]] = None
     target_roles: Optional[List[str]] = None
+    projects: Optional[List[Dict[str, Any]]] = None
+    internships: Optional[List[Dict[str, Any]]] = None
+    achievements: Optional[List[Dict[str, Any]]] = None
+    academic_records: Optional[List[Dict[str, Any]]] = None
     placement_status: Optional[str] = "UNPLACED"
+    preferences: Optional[Dict[str, Any]] = None
 
 class StudentProfileOutSchema(Schema):
     id: int
     username: str
     email: str
+    gender: str = "PREFER_NOT_TO_SAY"
     bio: Optional[str] = None
     current_designation: Optional[str] = ""
     experience_years: Optional[float] = 0.0
@@ -74,6 +109,10 @@ class StudentProfileOutSchema(Schema):
     linkedin_url: Optional[str] = ""
     portfolio_url: Optional[str] = ""
     certifications: List[Dict[str, Any]] = []
+    projects: List[Dict[str, Any]] = []
+    internships: List[Dict[str, Any]] = []
+    achievements: List[Dict[str, Any]] = []
+    academic_records: List[Dict[str, Any]] = []
     skills_matrix: Dict[str, Any] = {}
     skills_categorized: Dict[str, Any] = {}
     raw_extracted_skills: List[str] = []
@@ -84,6 +123,76 @@ class StudentProfileOutSchema(Schema):
     profile_strength_score: float = 0.0
     profile_strength_breakdown: Optional[ProfileStrengthBreakdownSchema] = None
     is_verified: bool
+    preferences: Dict[str, Any] = {}
+
+# --- DIGITAL PORTFOLIO & INTERNSHIP MILESTONE SCHEMAS (PS REQUIREMENT) ---
+
+class AchievementItemSchema(Schema):
+    title: str
+    issuer: Optional[str] = ""
+    year: Optional[int] = None
+    description: Optional[str] = ""
+    proof_url: Optional[str] = ""
+
+class AchievementsUpdateInSchema(Schema):
+    achievements: List[AchievementItemSchema]
+
+class StudentPortfolioOutSchema(Schema):
+    id: int
+    username: str
+    email: str
+    bio: Optional[str] = None
+    current_designation: Optional[str] = ""
+    experience_years: Optional[float] = 0.0
+    institution: Optional[str] = ""
+    department: Optional[str] = ""
+    degree: Optional[str] = ""
+    cgpa: Optional[float] = None
+    graduation_year: Optional[int] = None
+    github_url: Optional[str] = ""
+    linkedin_url: Optional[str] = ""
+    portfolio_url: Optional[str] = ""
+    is_verified: bool
+    overall_confidence_score: float
+    profile_strength_score: float = 0.0
+    profile_strength_breakdown: Optional[ProfileStrengthBreakdownSchema] = None
+    placement_status: str
+    target_roles: List[str] = []
+    skills_matrix: Dict[str, Any] = {}
+    skills_categorized: Dict[str, Any] = {}
+    role_fit_matrix: Dict[str, Any] = {}
+    certifications: List[Dict[str, Any]] = []
+    projects: List[Dict[str, Any]] = []
+    internships: List[Dict[str, Any]] = []
+    achievements: List[Dict[str, Any]] = []
+    academic_records: List[Dict[str, Any]] = []
+    active_internships: List[Dict[str, Any]] = []
+    is_blind: bool = False
+
+class MilestoneLogCreateIn(Schema):
+    week_number: int
+    milestone_summary: str
+    hours_logged: Optional[int] = 40
+    deliverables_url: Optional[str] = ""
+
+class ActiveInternshipDetailOut(Schema):
+    application_id: int
+    listing_id: int
+    title: str
+    company_name: str
+    company_logo: Optional[str] = ""
+    location: str
+    stipend_or_ctc: str
+    role_type: str
+    internship_status: str
+    mentor_name: Optional[str] = ""
+    mentor_designation: Optional[str] = ""
+    mentor_feedback: Optional[str] = ""
+    mentor_rating: Optional[float] = None
+    completion_certificate_url: Optional[str] = ""
+    internship_report_url: Optional[str] = ""
+    weekly_progress_logs: List[Dict[str, Any]] = []
+
 
 # --- PHASE 3 SCHEMAS (Test Generation) ---
 
@@ -125,7 +234,11 @@ class TestGradingOutSchema(Schema):
     mcq_average: int
     viva_average: int
     confidence_score: int
-    feedback_log: List[FeedbackDetailSchema]
+    feedback_log: List[FeedbackDetailSchema] = []
+    retest_required: bool = False
+    fault_acknowledged: bool = False
+    message: Optional[str] = ""
+    retest_session_id: Optional[int] = None
 
 # --- PHASE 5 SCHEMAS (Recruiter Hybrid Search & Ranking) ---
 
@@ -184,6 +297,9 @@ class JobDiscoveryItemOut(Schema):
     eligibility_criteria: Dict[str, Any] = {}
     application_deadline: Optional[datetime] = None
     description: str
+    is_diversity_drive: bool = False
+    target_gender: str = "ALL"
+    dei_initiatives: List[str] = []
     created_at: datetime
 
 class JobDiscoveryFeedOut(Schema):
@@ -269,3 +385,43 @@ class UpcomingDeadlineOut(Schema):
 class DeadlinesHubOut(Schema):
     upcoming_interviews: List[UpcomingInterviewOut]
     upcoming_deadlines: List[UpcomingDeadlineOut]
+
+# --- PHASE 7 SCHEMAS: MULTI-DOMAIN GOVERNMENT & AFFIRMATIVE ACTION SCHEMES ---
+
+class GovernmentSchemeOutSchema(Schema):
+    id: int
+    title: str
+    sponsoring_agency: str
+    domain: str
+    scheme_type: str
+    target_gender: str
+    benefit_summary: str
+    description: str
+    eligible_degrees: List[str] = []
+    min_cgpa: Optional[float] = None
+    application_deadline: Optional[datetime] = None
+    official_portal_url: str
+    status: str
+    badge_color: str
+    is_eligible: Optional[bool] = None
+    match_reasons: List[str] = []
+    created_at: datetime
+
+class GovernmentSchemeCreateIn(Schema):
+    title: str
+    sponsoring_agency: str
+    domain: Optional[str] = "ALL"
+    scheme_type: Optional[str] = "SCHOLARSHIP"
+    target_gender: Optional[str] = "FEMALE_ONLY"
+    benefit_summary: str
+    description: str
+    eligible_degrees: Optional[List[str]] = []
+    min_cgpa: Optional[float] = None
+    application_deadline: Optional[datetime] = None
+    official_portal_url: str
+    badge_color: Optional[str] = "purple"
+
+class LiveSchemesFeedOut(Schema):
+    total_schemes: int
+    user_gender: Optional[str] = None
+    schemes: List[GovernmentSchemeOutSchema]

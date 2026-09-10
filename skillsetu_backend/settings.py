@@ -97,7 +97,7 @@ AUTH_USER_MODEL = 'accounts.User'
 #     }
 # }
 
-# PostgreSQL Database Configuration
+# PostgreSQL Database Configuration with Persistent Connection Pooling & PgBouncer Support
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -106,6 +106,9 @@ DATABASES = {
         'PASSWORD': os.getenv('DB_PASSWORD', ''),
         'HOST': os.getenv('DB_HOST', '127.0.0.1'),
         'PORT': os.getenv('DB_PORT', '5432'),
+        'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '600')),
+        'CONN_HEALTH_CHECKS': os.getenv('DB_CONN_HEALTH_CHECKS', 'True').lower() in ('true', '1'),
+        'DISABLE_SERVER_SIDE_CURSORS': os.getenv('DB_DISABLE_SERVER_SIDE_CURSORS', 'False').lower() in ('true', '1'),
     }
 }
 

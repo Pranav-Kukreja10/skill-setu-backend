@@ -8,7 +8,7 @@ from django.shortcuts import get_object_or_404
 
 from accounts.models import User
 from accounts.security import JWTAuth, RecruiterAuth, StudentAuth
-from students.models import StudentProfile, TestSession, Notification
+from students.models import StudentProfile, TestSession, Notification, GovernmentScheme
 from recruiters.models import JobListing, JobApplication, Company
 from students.services import (
     extract_text_from_file,
@@ -43,7 +43,16 @@ from students.schemas import (
     NotificationItemOut,
     DeadlinesHubOut,
     UpcomingInterviewOut,
-    UpcomingDeadlineOut
+    UpcomingDeadlineOut,
+    StudentPortfolioOutSchema,
+    AchievementsUpdateInSchema,
+    MilestoneLogCreateIn,
+    ActiveInternshipDetailOut,
+    StudentPreferencesSchema,
+    StudentPreferencesUpdateIn,
+    GovernmentSchemeOutSchema,
+    GovernmentSchemeCreateIn,
+    LiveSchemesFeedOut
 )
 from recruiters.schemas import (
     CandidateJobSearchIn,
@@ -78,6 +87,10 @@ def _student_to_out_schema(profile: StudentProfile) -> dict:
         "linkedin_url": profile.linkedin_url or "",
         "portfolio_url": profile.portfolio_url or "",
         "certifications": getattr(profile, 'certifications', []) or [],
+        "projects": profile.projects or [],
+        "internships": getattr(profile, 'internships', []) or [],
+        "achievements": getattr(profile, 'achievements', []) or [],
+        "academic_records": getattr(profile, 'academic_records', []) or [],
         "skills_matrix": profile.skills_matrix or {},
         "skills_categorized": profile.skills_categorized or {},
         "raw_extracted_skills": profile.raw_extracted_skills or [],
@@ -87,8 +100,82 @@ def _student_to_out_schema(profile: StudentProfile) -> dict:
         "overall_confidence_score": profile.overall_confidence_score,
         "profile_strength_score": p_strength,
         "profile_strength_breakdown": breakdown,
-        "is_verified": profile.is_verified
+        "is_verified": profile.is_verified,
+        "gender": getattr(profile, 'gender', 'PREFER_NOT_TO_SAY') or 'PREFER_NOT_TO_SAY',
+        "preferences": profile.get_preferences() if hasattr(profile, 'get_preferences') else {}
     }
+
+
+def _student_to_portfolio_schema(profile: StudentProfile, is_blind: bool = False) -> dict:
+    """
+    Format complete Student Digital Portfolio (PS Requirement):
+    Aggregates verified skills matrix (Ws), cognitive score, profile strength score,
+    certifications, projects, past internships, achievements/hackathons,
+    academic records/transcripts, and live active internships.
+    Supports is_blind redaction for bias-free candidate review.
+    """
+    p_strength, breakdown = compute_profile_strength(profile)
+    user = profile.user
+
+    # Fetch active or past internships from JobApplication
+    active_apps = JobApplication.objects.filter(
+        student=profile
+    ).exclude(internship_status=JobApplication.InternshipStatus.NOT_STARTED).select_related('listing__company')
+
+    active_internships = []
+    for app in active_apps:
+        active_internships.append({
+            "application_id": app.id,
+            "listing_id": app.listing.id,
+            "title": app.listing.title,
+            "company_name": app.listing.company.name if app.listing.company else "",
+            "company_logo": app.listing.company.branding_logo_url if app.listing.company else "",
+            "location": app.listing.location,
+            "stipend_or_ctc": app.listing.stipend_or_ctc,
+            "role_type": app.listing.role_type,
+            "internship_status": app.internship_status,
+            "mentor_name": app.mentor_name or "",
+            "mentor_designation": app.mentor_designation or "",
+            "mentor_feedback": app.mentor_feedback or "",
+            "mentor_rating": app.mentor_rating,
+            "completion_certificate_url": app.completion_certificate_url or "",
+            "internship_report_url": app.internship_report_url or "",
+            "weekly_progress_logs": app.weekly_progress_logs or []
+        })
+
+    return {
+        "id": profile.id,
+        "username": f"Candidate #{profile.id}" if is_blind else user.username,
+        "email": "[REDACTED]" if is_blind else user.email,
+        "bio": "[REDACTED FOR UNBIASED SCREENING]" if is_blind else (profile.bio or ""),
+        "current_designation": getattr(profile, 'current_designation', "") or "",
+        "experience_years": getattr(profile, 'experience_years', 0.0) or 0.0,
+        "institution": "[REDACTED]" if is_blind else (profile.institution or ""),
+        "department": profile.department or "",
+        "degree": profile.degree or "",
+        "cgpa": profile.cgpa,
+        "graduation_year": profile.graduation_year,
+        "github_url": "" if is_blind else (getattr(profile, 'github_url', "") or ""),
+        "linkedin_url": "" if is_blind else (profile.linkedin_url or ""),
+        "portfolio_url": "" if is_blind else (profile.portfolio_url or ""),
+        "is_verified": profile.is_verified,
+        "overall_confidence_score": profile.overall_confidence_score,
+        "profile_strength_score": p_strength,
+        "profile_strength_breakdown": breakdown,
+        "placement_status": profile.placement_status or "UNPLACED",
+        "target_roles": profile.target_roles or [],
+        "skills_matrix": profile.skills_matrix or {},
+        "skills_categorized": profile.skills_categorized or {},
+        "role_fit_matrix": profile.role_fit_matrix or {},
+        "certifications": getattr(profile, 'certifications', []) or [],
+        "projects": profile.projects or [],
+        "internships": getattr(profile, 'internships', []) or [],
+        "achievements": getattr(profile, 'achievements', []) or [],
+        "academic_records": getattr(profile, 'academic_records', []) or [],
+        "active_internships": active_internships,
+        "is_blind": is_blind
+    }
+
 
 
 def _application_to_schema(app: JobApplication) -> JobApplicationOut:
@@ -201,7 +288,10 @@ def preview_and_extract_resume(request, file: UploadedFile = File(...)):
             "social_links": analysis.get("social_links", {})
         }
     except Exception as e:
-        return 400, {"message": f"Preview Extraction Error: {str(e)}"}
+        return 400, {
+            "message": "Oops! It seems our neural engine hit an unexpected bump on our end while scanning your document. Please take a breath and try again in just a moment!",
+            "error_detail": str(e)
+        }
 
 
 @router.post("/analyze-resume", response={200: StudentProfileOutSchema, 400: dict})
@@ -289,7 +379,10 @@ def analyze_student_resume(request, payload: ResumeAnalysisInSchema):
         
         return 200, _student_to_out_schema(profile)
     except Exception as e:
-        return 400, {"message": f"AI Parsing/Sync Failure: {str(e)}"}
+        return 400, {
+            "message": "Oops! It seems our neural pathways hit a brief detour on our end while syncing your profile. We've preserved your data safely. Please try again in just a moment!",
+            "error_detail": str(e)
+        }
 
 
 # ---------------------------------------------------------
@@ -313,6 +406,10 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
     
     if payload.bio is not None:
         profile.bio = payload.bio
+    if payload.gender is not None:
+        profile.gender = payload.gender
+    if payload.preferences is not None:
+        profile.preferences = payload.preferences
     if payload.current_designation is not None:
         profile.current_designation = payload.current_designation
     if payload.experience_years is not None:
@@ -343,6 +440,14 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
         profile.target_roles = payload.target_roles
     if payload.skills_categorized is not None:
         profile.skills_categorized = payload.skills_categorized
+    if payload.projects is not None:
+        profile.projects = payload.projects
+    if payload.internships is not None:
+        profile.internships = payload.internships
+    if payload.achievements is not None:
+        profile.achievements = payload.achievements
+    if payload.academic_records is not None:
+        profile.academic_records = payload.academic_records
 
     if payload.skills_matrix is not None:
         certs = payload.certifications if payload.certifications is not None else (profile.certifications or [])
@@ -383,6 +488,166 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
 def update_my_profile_post(request, payload: StudentProfileInSchema):
     """Backwards-compatible POST /me route for updating student profile."""
     return update_my_profile_put(request, payload)
+
+
+@router.get("/me/settings", response=StudentPreferencesSchema)
+def get_my_settings(request):
+    """
+    Retrieve candidate's granular feature and notification personalization preferences.
+    """
+    profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
+    return profile.get_preferences()
+
+
+@router.patch("/me/settings", response=StudentPreferencesSchema)
+def update_my_settings(request, payload: StudentPreferencesUpdateIn):
+    """
+    Update candidate's granular personalization preferences (notifications, features, privacy).
+    Supports disabling affirmative action displays, diversity job badges, or specific alert types.
+    """
+    profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
+    current = profile.get_preferences()
+    if payload.notifications is not None:
+        current["notifications"].update(payload.notifications)
+    if payload.features is not None:
+        current["features"].update(payload.features)
+    if payload.privacy is not None:
+        current["privacy"].update(payload.privacy)
+    profile.preferences = current
+    profile.save(update_fields=['preferences'])
+    return current
+
+
+# ---------------------------------------------------------
+# 2B. DIGITAL PORTFOLIO & INTERNSHIP MILESTONE TRACKING
+# ---------------------------------------------------------
+
+@router.get("/portfolio/me", response=StudentPortfolioOutSchema)
+def get_my_digital_portfolio(request):
+    """
+    Candidate Digital Portfolio (Self-View):
+    Full comprehensive portfolio showcasing verified skills matrix (Ws),
+    cognitive score, profile strength rating (0-100), industry certifications,
+    production projects, completed & active internships with mentor feedback,
+    achievements, and semester academic records.
+    """
+    profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
+    return _student_to_portfolio_schema(profile, is_blind=False)
+
+
+@router.get("/{student_id}/portfolio", response={200: StudentPortfolioOutSchema, 404: dict})
+def get_candidate_portfolio_by_id(request, student_id: int, blind: bool = False):
+    """
+    Candidate Digital Portfolio (Public / Recruiter / Institutional View):
+    Enables recruiters and faculty to inspect a candidate's complete portfolio.
+    Supports blind=true query parameter to redact PII (name, email, institution)
+    for unbiased, merit-based screening.
+    """
+    profile = StudentProfile.objects.filter(id=student_id).select_related('user').first()
+    if not profile:
+        return 404, {"message": f"Candidate profile with ID {student_id} not found."}
+    return 200, _student_to_portfolio_schema(profile, is_blind=blind)
+
+
+@router.put("/portfolio/achievements", response={200: StudentPortfolioOutSchema, 400: dict})
+def update_portfolio_achievements(request, payload: AchievementsUpdateInSchema):
+    """
+    Update Candidate Verified Achievements:
+    Records hackathons, awards, research papers, and honors directly in the digital portfolio.
+    """
+    profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
+    profile.achievements = [a.dict() for a in payload.achievements]
+    profile.save(update_fields=['achievements'])
+    try:
+        index_student_profile(profile)
+    except Exception:
+        pass
+    return 200, _student_to_portfolio_schema(profile, is_blind=False)
+
+
+@router.get("/internships/active", response=List[ActiveInternshipDetailOut])
+def get_active_internships(request):
+    """
+    Active Internship Progress Tracker:
+    Lists ongoing and completed internships for the logged-in candidate,
+    including weekly milestone logs, supervisor/mentor feedback, and completion certificates.
+    """
+    profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
+    apps = JobApplication.objects.filter(
+        student=profile
+    ).exclude(internship_status=JobApplication.InternshipStatus.NOT_STARTED).select_related('listing__company')
+
+    results = []
+    for app in apps:
+        comp = app.listing.company
+        results.append(ActiveInternshipDetailOut(
+            application_id=app.id,
+            listing_id=app.listing.id,
+            title=app.listing.title,
+            company_name=comp.name if comp else "",
+            company_logo=comp.branding_logo_url if comp else "",
+            location=app.listing.location,
+            stipend_or_ctc=app.listing.stipend_or_ctc,
+            role_type=app.listing.role_type,
+            internship_status=app.internship_status,
+            mentor_name=app.mentor_name or "",
+            mentor_designation=app.mentor_designation or "",
+            mentor_feedback=app.mentor_feedback or "",
+            mentor_rating=app.mentor_rating,
+            completion_certificate_url=app.completion_certificate_url or "",
+            internship_report_url=app.internship_report_url or "",
+            weekly_progress_logs=app.weekly_progress_logs or []
+        ))
+    return results
+
+
+@router.post("/internships/{application_id}/log-milestone", response={200: ActiveInternshipDetailOut, 400: dict, 404: dict})
+def log_internship_milestone(request, application_id: int, payload: MilestoneLogCreateIn):
+    """
+    Internship Progress Tracking - Weekly Milestone Logger:
+    Allows students to log weekly progress, deliverables URLs, and hours worked.
+    Automatically transitions internship status to IN_PROGRESS if currently NOT_STARTED.
+    """
+    profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
+    app = JobApplication.objects.select_related('listing__company').filter(id=application_id, student=profile).first()
+    if not app:
+        return 404, {"message": "Internship application not found."}
+
+    logs = list(app.weekly_progress_logs or [])
+    logs.append({
+        "week": payload.week_number,
+        "milestone": payload.milestone_summary,
+        "hours": payload.hours_logged or 40,
+        "deliverables_url": payload.deliverables_url or "",
+        "logged_at": datetime.now().isoformat()
+    })
+    app.weekly_progress_logs = logs
+
+    if app.internship_status == JobApplication.InternshipStatus.NOT_STARTED:
+        app.internship_status = JobApplication.InternshipStatus.IN_PROGRESS
+
+    app.save()
+
+    comp = app.listing.company
+    return 200, ActiveInternshipDetailOut(
+        application_id=app.id,
+        listing_id=app.listing.id,
+        title=app.listing.title,
+        company_name=comp.name if comp else "",
+        company_logo=comp.branding_logo_url if comp else "",
+        location=app.listing.location,
+        stipend_or_ctc=app.listing.stipend_or_ctc,
+        role_type=app.listing.role_type,
+        internship_status=app.internship_status,
+        mentor_name=app.mentor_name or "",
+        mentor_designation=app.mentor_designation or "",
+        mentor_feedback=app.mentor_feedback or "",
+        mentor_rating=app.mentor_rating,
+        completion_certificate_url=app.completion_certificate_url or "",
+        internship_report_url=app.internship_report_url or "",
+        weekly_progress_logs=app.weekly_progress_logs or []
+    )
+
 
 
 # ---------------------------------------------------------
@@ -433,7 +698,10 @@ def get_student_screening_test(request, role_title: str):
             "questions": secured_questions
         }
     except Exception as e:
-        return 400, {"message": f"Test Generation Failure: {str(e)}"}
+        return 400, {
+            "message": "Oops! Our screening assessment engine hit a brief latency detour on our end. Everything on your profile is intact. Please take a breath and try again!",
+            "error_detail": str(e)
+        }
 
 
 @router.post("/submit-test", response={200: TestGradingOutSchema, 400: dict})
@@ -464,6 +732,24 @@ def submit_student_screening_test(request, data: TestSubmissionInSchema = Body(.
             resume_rating=resume_rating
         )
         
+        # Rigorous verification guarantee: on AI grading failure, NEVER award free unearned scores.
+        # Transparently acknowledge the fault on our side, keep the session open, and mandate an immediate retest.
+        if grading_result.get("retest_required"):
+            db_session.is_completed = False
+            db_session.save()
+            return 200, {
+                "success": False,
+                "cognitive_score": 0,
+                "mcq_average": grading_result.get("mcq_average", 0),
+                "viva_average": 0,
+                "confidence_score": 0,
+                "feedback_log": grading_result.get("feedback_log", []),
+                "retest_required": True,
+                "fault_acknowledged": True,
+                "message": grading_result.get("message", ""),
+                "retest_session_id": db_session.id
+            }
+
         role_fit_data["verified_confidence_score"] = grading_result["confidence_score"]
         profile.role_fit_matrix[data.target_role] = role_fit_data
         profile.overall_confidence_score = grading_result["confidence_score"]
@@ -488,7 +774,11 @@ def submit_student_screening_test(request, data: TestSubmissionInSchema = Body(.
             "mcq_average": grading_result["mcq_average"],
             "viva_average": grading_result["viva_average"],
             "confidence_score": grading_result["confidence_score"],
-            "feedback_log": grading_result["feedback_log"]
+            "feedback_log": grading_result["feedback_log"],
+            "retest_required": False,
+            "fault_acknowledged": False,
+            "message": "Assessment evaluated successfully.",
+            "retest_session_id": None
         }
     except Exception as e:
         return 400, {"message": f"Grading Engine Failure: {str(e)}"}
@@ -505,12 +795,14 @@ def get_job_discovery_feed(
     location: Optional[str] = None,
     is_remote: Optional[bool] = None,
     skill_tag: Optional[str] = None,
+    is_diversity_drive: Optional[bool] = None,
+    target_gender: Optional[str] = None,
     q: Optional[str] = None
 ):
     """
     Active Openings Feed:
     Displays published job and internship openings with dynamic filters for
-    role type, location, remote arrangement, stipend/CTC, and required technical skills.
+    role type, location, remote arrangement, DEI diversity hiring drives, and required technical skills.
     Excludes past deadlines automatically.
     """
     qs = JobListing.objects.filter(
@@ -529,6 +821,10 @@ def get_job_discovery_feed(
         qs = qs.filter(location__icontains=location)
     if is_remote is not None:
         qs = qs.filter(is_remote=is_remote)
+    if is_diversity_drive is not None:
+        qs = qs.filter(is_diversity_drive=is_diversity_drive)
+    if target_gender:
+        qs = qs.filter(target_gender__iexact=target_gender)
     if skill_tag:
         qs = qs.filter(required_skills__icontains=skill_tag)
     if q:
@@ -559,6 +855,9 @@ def get_job_discovery_feed(
             eligibility_criteria=l.eligibility_criteria or {},
             application_deadline=getattr(l, 'application_deadline', None),
             description=l.description,
+            is_diversity_drive=getattr(l, 'is_diversity_drive', False),
+            target_gender=getattr(l, 'target_gender', 'ALL'),
+            dei_initiatives=getattr(l, 'dei_initiatives', []) or [],
             created_at=l.created_at
         ))
 
@@ -613,14 +912,15 @@ def search_jobs_get(
 # 6. ONE-CLICK DIRECT APPLY & CONCURRENCY RESILIENCE
 # ---------------------------------------------------------
 
-@router.post("/jobs/{listing_id}/apply", response={201: JobApplicationOut, 400: dict, 404: dict, 409: dict})
+@router.post("/jobs/{listing_id}/apply", response={201: JobApplicationOut, 200: JobApplicationOut, 400: dict, 404: dict, 409: dict})
 def apply_to_job(request, listing_id: int, payload: Optional[JobApplicationApplyIn] = None):
     """
-    One-Click Direct Apply Workflow:
+    One-Click Direct Apply Workflow (Idempotent):
     Attaches the candidate's verified skills profile and calculates instant match score.
     Strict Concurrency: Implements select_for_update() row locks on JobListing and StudentProfile
     to prevent double application or stale state transitions, catching OperationalError (409 Conflict).
     Checks application deadlines and creates an automated confirmation notification.
+    Idempotency: Re-submitting for the same listing safely returns 200 OK with the existing application.
     """
     try:
         with transaction.atomic():
@@ -636,7 +936,8 @@ def apply_to_job(request, listing_id: int, payload: Optional[JobApplicationApply
 
             existing = JobApplication.objects.filter(listing=listing, student=student_profile).first()
             if existing:
-                return 400, {"message": "You have already applied to this listing."}
+                # Idempotent response: return existing application without duplicate side-effects
+                return 200, _application_to_schema(existing)
 
             # Deterministic skill fitment snapshot
             student_skills = list((student_profile.skills_matrix or {}).keys())
@@ -940,3 +1241,237 @@ def list_students(request):
     """Retrieve all student profiles for recruiters."""
     profiles = StudentProfile.objects.select_related('user').all()
     return [_student_to_out_schema(p) for p in profiles]
+
+
+# ---------------------------------------------------------
+# 12. MULTI-DOMAIN GOVERNMENT & AFFIRMATIVE ACTION SCHEMES
+# ---------------------------------------------------------
+
+@router.get("/me/schemes", response=LiveSchemesFeedOut)
+def get_my_personalized_schemes(request):
+    """
+    Candidate Personalized Affirmative Action & Government Schemes Radar:
+    Cross-checks candidate's demographic profile (gender, degree, CGPA, department)
+    against live national schemes and corporate DEI initiatives across all sectors.
+    Respects candidate's 'show_affirmative_action_schemes' preference toggle.
+    """
+    profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
+    prefs = profile.get_preferences()
+    
+    # Check candidate preference toggle
+    show_schemes = prefs.get("features", {}).get("show_affirmative_action_schemes", True)
+    if not show_schemes:
+        return {
+            "total_schemes": 0,
+            "user_gender": profile.gender,
+            "schemes": []
+        }
+
+    schemes_qs = GovernmentScheme.objects.filter(status=GovernmentScheme.SchemeStatus.ACTIVE)
+    
+    results = []
+    for s in schemes_qs:
+        is_eligible = True
+        reasons = []
+
+        # Gender matching
+        if s.target_gender == GovernmentScheme.TargetGender.FEMALE_ONLY:
+            if profile.gender == StudentProfile.Gender.FEMALE:
+                reasons.append("Eligible: Women in STEM / Commerce / Management Affirmative Action Initiative")
+            else:
+                is_eligible = False
+                reasons.append("Restricted to Female Candidates")
+        else:
+            reasons.append("Open to All Eligible Candidates")
+
+        # Degree matching
+        if s.eligible_degrees and len(s.eligible_degrees) > 0:
+            if profile.degree:
+                deg_match = any(deg.lower() in profile.degree.lower() for deg in s.eligible_degrees)
+                if deg_match:
+                    reasons.append(f"Eligible Degree: {profile.degree}")
+                else:
+                    is_eligible = False
+                    reasons.append(f"Requires: {', '.join(s.eligible_degrees)}")
+            else:
+                reasons.append(f"Requires: {', '.join(s.eligible_degrees)}")
+
+        # CGPA matching
+        if s.min_cgpa is not None:
+            if profile.cgpa is not None:
+                if profile.cgpa >= s.min_cgpa:
+                    reasons.append(f"Meets minimum CGPA of {s.min_cgpa} (Your CGPA: {profile.cgpa})")
+                else:
+                    is_eligible = False
+                    reasons.append(f"Requires minimum CGPA of {s.min_cgpa} (Your CGPA: {profile.cgpa})")
+            else:
+                reasons.append(f"Requires minimum CGPA of {s.min_cgpa}")
+
+        results.append(GovernmentSchemeOutSchema(
+            id=s.id,
+            title=s.title,
+            sponsoring_agency=s.sponsoring_agency,
+            domain=s.domain,
+            scheme_type=s.scheme_type,
+            target_gender=s.target_gender,
+            benefit_summary=s.benefit_summary,
+            description=s.description,
+            eligible_degrees=s.eligible_degrees or [],
+            min_cgpa=s.min_cgpa,
+            application_deadline=s.application_deadline,
+            official_portal_url=s.official_portal_url,
+            status=s.status,
+            badge_color=s.badge_color,
+            is_eligible=is_eligible,
+            match_reasons=reasons,
+            created_at=s.created_at
+        ))
+
+    # Prioritize eligible schemes first
+    results.sort(key=lambda x: (not x.is_eligible, x.application_deadline or timezone.now()))
+
+    return {
+        "total_schemes": len(results),
+        "user_gender": profile.gender,
+        "schemes": results
+    }
+
+
+schemes_router = Router(tags=["Government & Affirmative Action Schemes"])
+
+@schemes_router.get("/live", response=LiveSchemesFeedOut, auth=None)
+def get_live_government_schemes_directory(
+    request,
+    domain: Optional[str] = None,
+    scheme_type: Optional[str] = None,
+    target_gender: Optional[str] = None,
+    q: Optional[str] = None
+):
+    """
+    Public Live Government Schemes Directory:
+    Universal discovery feed of national scholarships, research fellowships,
+    and corporate diversity programs across all academic fields.
+    """
+    qs = GovernmentScheme.objects.all()
+    if domain:
+        qs = qs.filter(domain__iexact=domain)
+    if scheme_type:
+        qs = qs.filter(scheme_type__iexact=scheme_type)
+    if target_gender:
+        qs = qs.filter(target_gender__iexact=target_gender)
+    if q:
+        qs = qs.filter(
+            models.Q(title__icontains=q) |
+            models.Q(sponsoring_agency__icontains=q) |
+            models.Q(description__icontains=q) |
+            models.Q(benefit_summary__icontains=q)
+        )
+        
+    items = []
+    for s in qs:
+        items.append(GovernmentSchemeOutSchema(
+            id=s.id,
+            title=s.title,
+            sponsoring_agency=s.sponsoring_agency,
+            domain=s.domain,
+            scheme_type=s.scheme_type,
+            target_gender=s.target_gender,
+            benefit_summary=s.benefit_summary,
+            description=s.description,
+            eligible_degrees=s.eligible_degrees or [],
+            min_cgpa=s.min_cgpa,
+            application_deadline=s.application_deadline,
+            official_portal_url=s.official_portal_url,
+            status=s.status,
+            badge_color=s.badge_color,
+            is_eligible=None,
+            match_reasons=[],
+            created_at=s.created_at
+        ))
+    return {
+        "total_schemes": len(items),
+        "user_gender": None,
+        "schemes": items
+    }
+
+
+@schemes_router.post("/sync-live-status", response={200: dict})
+def sync_schemes_live_status(request):
+    """
+    Live Status Synchronizer:
+    Evaluates application deadlines against current time, marks expired schemes,
+    and dispatches notifications to matching female/candidate profiles with notification preferences enabled.
+    """
+    now = timezone.now()
+    expired_count = GovernmentScheme.objects.filter(
+        application_deadline__lt=now,
+        status=GovernmentScheme.SchemeStatus.ACTIVE
+    ).update(status=GovernmentScheme.SchemeStatus.EXPIRED)
+
+    # Scan active schemes and dispatch alerts to eligible female profiles
+    active_schemes = GovernmentScheme.objects.filter(status=GovernmentScheme.SchemeStatus.ACTIVE)
+    female_profiles = StudentProfile.objects.filter(gender=StudentProfile.Gender.FEMALE).select_related('user')
+    
+    notifications_created = 0
+    for sch in active_schemes:
+        if sch.target_gender == GovernmentScheme.TargetGender.FEMALE_ONLY:
+            for fp in female_profiles:
+                prefs = fp.get_preferences()
+                if not prefs.get("notifications", {}).get("scheme_alerts", True):
+                    continue
+                if not Notification.objects.filter(user=fp.user, title__icontains=sch.title).exists():
+                    Notification.objects.create(
+                        user=fp.user,
+                        title=f"Affirmative Action Alert: {sch.title}",
+                        message=f"A matching diversity/government scheme '{sch.title}' sponsored by {sch.sponsoring_agency} offering {sch.benefit_summary} is currently accepting applications.",
+                        notification_type=Notification.NotificationType.NEW_SCHEME
+                    )
+                    notifications_created += 1
+
+    return 200, {
+        "success": True,
+        "expired_schemes_updated": expired_count,
+        "notifications_dispatched": notifications_created,
+        "message": f"Synchronized live schemes: {expired_count} expired, {notifications_created} alert(s) dispatched."
+    }
+
+
+@schemes_router.post("/", response={201: GovernmentSchemeOutSchema, 400: dict}, auth=RecruiterAuth())
+def create_government_scheme(request, payload: GovernmentSchemeCreateIn):
+    """
+    Publish a new Government / Corporate Diversity Initiative.
+    Restricted to verified recruiters and administrators.
+    """
+    scheme = GovernmentScheme.objects.create(
+        title=payload.title,
+        sponsoring_agency=payload.sponsoring_agency,
+        domain=payload.domain or "ALL",
+        scheme_type=payload.scheme_type or "SCHOLARSHIP",
+        target_gender=payload.target_gender or "FEMALE_ONLY",
+        benefit_summary=payload.benefit_summary,
+        description=payload.description,
+        eligible_degrees=payload.eligible_degrees or [],
+        min_cgpa=payload.min_cgpa,
+        application_deadline=payload.application_deadline,
+        official_portal_url=payload.official_portal_url,
+        badge_color=payload.badge_color or "purple"
+    )
+    return 201, GovernmentSchemeOutSchema(
+        id=scheme.id,
+        title=scheme.title,
+        sponsoring_agency=scheme.sponsoring_agency,
+        domain=scheme.domain,
+        scheme_type=scheme.scheme_type,
+        target_gender=scheme.target_gender,
+        benefit_summary=scheme.benefit_summary,
+        description=scheme.description,
+        eligible_degrees=scheme.eligible_degrees or [],
+        min_cgpa=scheme.min_cgpa,
+        application_deadline=scheme.application_deadline,
+        official_portal_url=scheme.official_portal_url,
+        status=scheme.status,
+        badge_color=scheme.badge_color,
+        is_eligible=None,
+        match_reasons=[],
+        created_at=scheme.created_at
+    )

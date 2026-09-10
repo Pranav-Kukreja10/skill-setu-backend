@@ -56,7 +56,8 @@ class RecruiterProfileOut(Schema):
 
 class JobListingCreateIn(Schema):
     title: str
-    role_type: Optional[str] = "FULL_TIME"  # FULL_TIME, INTERNSHIP, CONTRACT
+    role_type: Optional[str] = "FULL_TIME"  # FULL_TIME, INTERNSHIP, FACULTY_INTERNSHIP, FDP, etc.
+    target_audience: Optional[str] = "STUDENT"  # STUDENT, FACULTY, ALL
     status: Optional[str] = "DRAFT"  # DRAFT, PUBLISHED
     stipend_or_ctc: str
     location: str
@@ -67,10 +68,15 @@ class JobListingCreateIn(Schema):
     required_skills: List[str] = []
     eligibility_criteria: Optional[Dict[str, Any]] = {}
     description: str
+    # DEI attributes
+    is_diversity_drive: Optional[bool] = False
+    target_gender: Optional[str] = "ALL"
+    dei_initiatives: Optional[List[str]] = []
 
 class JobListingUpdateIn(Schema):
     title: Optional[str] = None
     role_type: Optional[str] = None
+    target_audience: Optional[str] = None
     status: Optional[str] = None
     stipend_or_ctc: Optional[str] = None
     location: Optional[str] = None
@@ -81,6 +87,10 @@ class JobListingUpdateIn(Schema):
     required_skills: Optional[List[str]] = None
     eligibility_criteria: Optional[Dict[str, Any]] = None
     description: Optional[str] = None
+    # DEI attributes
+    is_diversity_drive: Optional[bool] = None
+    target_gender: Optional[str] = None
+    dei_initiatives: Optional[List[str]] = None
 
 class JobListingOut(Schema):
     id: int
@@ -93,6 +103,7 @@ class JobListingOut(Schema):
     recruiter_name: str
     title: str
     role_type: str
+    target_audience: str = "STUDENT"
     status: str
     stipend_or_ctc: str
     location: str
@@ -103,9 +114,13 @@ class JobListingOut(Schema):
     required_skills: List[str] = []
     eligibility_criteria: Dict[str, Any] = {}
     description: str
+    is_diversity_drive: bool = False
+    target_gender: str = "ALL"
+    dei_initiatives: List[str] = []
     applications_count: int = 0
     created_at: datetime
     updated_at: datetime
+
 
 # --- CANDIDATE NLP JOB SEARCH SCHEMAS ---
 
@@ -192,6 +207,15 @@ class JobApplicationOut(Schema):
     recruiter_notes: Optional[str] = ""
     interview_date: Optional[datetime] = None
     status_history: List[Dict[str, Any]] = []
+    # PS Internship Progress Fields
+    internship_status: str = "NOT_STARTED"
+    mentor_name: Optional[str] = ""
+    mentor_designation: Optional[str] = ""
+    mentor_feedback: Optional[str] = ""
+    mentor_rating: Optional[float] = None
+    completion_certificate_url: Optional[str] = ""
+    internship_report_url: Optional[str] = ""
+    weekly_progress_logs: List[Dict[str, Any]] = []
     created_at: datetime
     updated_at: datetime
 
@@ -209,7 +233,69 @@ class StudentMyApplicationOut(Schema):
     recruiter_notes: Optional[str] = ""
     interview_date: Optional[datetime] = None
     status_history: List[Dict[str, Any]] = []
+    # PS Internship Progress Fields
+    internship_status: str = "NOT_STARTED"
+    mentor_name: Optional[str] = ""
+    mentor_designation: Optional[str] = ""
+    mentor_feedback: Optional[str] = ""
+    mentor_rating: Optional[float] = None
+    completion_certificate_url: Optional[str] = ""
+    internship_report_url: Optional[str] = ""
+    weekly_progress_logs: List[Dict[str, Any]] = []
     created_at: datetime
+
+class InternshipProgressUpdateIn(Schema):
+    internship_status: str  # NOT_STARTED, IN_PROGRESS, COMPLETED, TERMINATED
+    mentor_name: Optional[str] = None
+    mentor_designation: Optional[str] = None
+    mentor_feedback: Optional[str] = None
+    mentor_rating: Optional[float] = None
+    completion_certificate_url: Optional[str] = None
+    internship_report_url: Optional[str] = None
+
+class InternshipMilestoneLogIn(Schema):
+    week_number: int
+    milestone_summary: str
+    hours_logged: Optional[int] = 40
+    deliverables_url: Optional[str] = ""
+
+# --- INDUSTRY LEARNING PROGRAMS & COLLABORATION INITIATIVES ---
+
+class LearningProgramOut(Schema):
+    id: int
+    company_id: int
+    company_name: str
+    company_logo: Optional[str] = ""
+    title: str
+    program_type: str
+    target_audience: str
+    description: str
+    skills_covered: List[str] = []
+    instructor_or_mentor: Optional[str] = ""
+    duration: str
+    mode: str
+    registration_deadline: Optional[datetime] = None
+    start_date: Optional[datetime] = None
+    is_certified: bool
+    branding_banner_url: Optional[str] = ""
+    enrolled_students_count: int = 0
+    enrolled_faculty_count: int = 0
+    created_at: datetime
+
+class LearningProgramCreateIn(Schema):
+    title: str
+    program_type: str = "WORKSHOP"
+    target_audience: str = "ALL"
+    description: str
+    skills_covered: List[str] = []
+    instructor_or_mentor: Optional[str] = ""
+    duration: str = "4 Weeks"
+    mode: str = "ONLINE"
+    registration_deadline: Optional[datetime] = None
+    start_date: Optional[datetime] = None
+    is_certified: bool = True
+    branding_banner_url: Optional[str] = ""
+
 
 # --- PLACEMENT REPORTING SCHEMAS ---
 

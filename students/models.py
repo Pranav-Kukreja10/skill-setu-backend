@@ -2,7 +2,7 @@ from django.db import models
 from django.conf import settings
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from pgvector.django import VectorField
+from pgvector.django import VectorField, HnswIndex
 
 class IndustrySector(models.Model):
     name = models.CharField(max_length=100, unique=True, help_text="e.g. IT, Mechanical, Finance")
@@ -35,9 +35,31 @@ class StudentProfile(models.Model):
         PLACED = 'PLACED', 'Placed'
         OPEN_TO_INTERN = 'OPEN_TO_INTERN', 'Open to Internships'
 
+    class Gender(models.TextChoices):
+        FEMALE = 'FEMALE', 'Female'
+        MALE = 'MALE', 'Male'
+        NON_BINARY = 'NON_BINARY', 'Non-Binary'
+        PREFER_NOT_TO_SAY = 'PREFER_NOT_TO_SAY', 'Prefer not to say'
+
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='student_profile')
     github_handle = models.CharField(max_length=255, blank=True, null=True)
     bio = models.TextField(blank=True, null=True)
+
+    # Demographic attributes for affirmative action & government scheme matching
+    gender = models.CharField(
+        max_length=20,
+        choices=Gender.choices,
+        default=Gender.PREFER_NOT_TO_SAY,
+        blank=True,
+        help_text="Self-identified gender for demographic opportunity matching and affirmative action schemes"
+    )
+
+    # Granular profile personalisation & notification preferences
+    preferences = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Granular feature and notification toggles: notifications, features, and privacy preferences"
+    )
     
     # Store multi-dimensional skills with AI-graded evidence weights
     skills_matrix = models.JSONField(default=dict, blank=True)
@@ -87,6 +109,27 @@ class StudentProfile(models.Model):
         blank=True,
         help_text="Categorized skills: {'technical_skills': [], 'frameworks': [], 'tools': [], 'soft_skills': []}"
     )
+
+    # PS Requirement: Digital Portfolio - Verified Internships & Experience
+    internships = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Completed internships: [{'company': '...', 'role': '...', 'duration': '...', 'mentor_feedback': '...', 'mentor_rating': 4.5, 'certificate_url': '...'}]"
+    )
+
+    # PS Requirement: Digital Portfolio - Verified Achievements & Honors
+    achievements = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Hackathons, awards, honors, publications: [{'title': '...', 'issuer': '...', 'year': 2024, 'description': '...'}]"
+    )
+
+    # PS Requirement: Academic Records & Transcripts
+    academic_records = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Semester GPA records & academic transcripts: [{'semester': 1, 'sgpa': 8.8, 'credits': 24}]"
+    )
     
     overall_confidence_score = models.FloatField(default=0.0)
     profile_strength_score = models.FloatField(default=0.0, blank=True, help_text="Calculated profile strength score (0-100) based on 45/30/15/10 industry weighting")
@@ -100,6 +143,40 @@ class StudentProfile(models.Model):
 
     class Meta:
         db_table = 'skillsetu_student_profiles'
+        indexes = [
+            HnswIndex(
+                name='student_profile_hnsw_idx',
+                fields=['embedding'],
+                m=16,
+                ef_construction=64,
+                opclasses=['vector_cosine_ops'],
+            ),
+        ]
+
+    def get_preferences(self) -> dict:
+        defaults = {
+            "notifications": {
+                "opportunity_alerts": True,
+                "deadline_reminders": True,
+                "scheme_alerts": True,
+                "application_status_updates": True,
+            },
+            "features": {
+                "show_affirmative_action_schemes": True,
+                "show_diversity_job_badges": True,
+                "smart_roadmap_recommendations": True,
+                "reverse_matching_radar": True,
+            },
+            "privacy": {
+                "participate_in_diversity_hiring": True,
+                "share_profile_with_verified_recruiters": True,
+            }
+        }
+        current = self.preferences or {}
+        merged = {}
+        for section, sec_defaults in defaults.items():
+            merged[section] = {**sec_defaults, **current.get(section, {})}
+        return merged
 
     def __str__(self):
         return f"{self.user.username}'s Profile"
@@ -111,6 +188,7 @@ class Notification(models.Model):
         NEW_OPPORTUNITY = 'NEW_OPPORTUNITY', 'New Opportunity'
         DEADLINE_APPROACHING = 'DEADLINE_APPROACHING', 'Deadline Approaching'
         APPLICATION_REVIEW = 'APPLICATION_REVIEW', 'Application Review'
+        NEW_SCHEME = 'NEW_SCHEME', 'New Government / Diversity Scheme'
         SYSTEM = 'SYSTEM', 'System Alert'
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='notifications')
@@ -132,6 +210,60 @@ class Notification(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.title} [{self.notification_type}]"
+
+
+class GovernmentScheme(models.Model):
+    """
+    Universal Multi-Domain Government & Affirmative Action Schemes
+    Empowers candidates (especially women in STEM, finance, management, design)
+    with direct portal access, verified grants, scholarships, and corporate DEI initiatives.
+    """
+    class Domain(models.TextChoices):
+        TECH = 'TECH', 'Engineering & Technology'
+        FINANCE = 'FINANCE', 'Commerce & Finance'
+        MANAGEMENT = 'MANAGEMENT', 'Management & Business'
+        DESIGN = 'DESIGN', 'Design & Creative Arts'
+        ALL = 'ALL', 'Cross-Domain / Universal'
+
+    class SchemeType(models.TextChoices):
+        SCHOLARSHIP = 'SCHOLARSHIP', 'Scholarship & Financial Aid'
+        INTERNSHIP = 'INTERNSHIP', 'Corporate Diversity Internship'
+        MENTORSHIP = 'MENTORSHIP', 'Mentorship & Upskilling'
+        RESEARCH_GRANT = 'RESEARCH_GRANT', 'Research Grant / Fellowship'
+        INNOVATION_CHALLENGE = 'INNOVATION_CHALLENGE', 'Innovation Challenge / Hackathon'
+
+    class TargetGender(models.TextChoices):
+        FEMALE_ONLY = 'FEMALE_ONLY', 'Women / Female Candidates'
+        ALL = 'ALL', 'All Eligible Candidates'
+
+    class SchemeStatus(models.TextChoices):
+        ACTIVE = 'ACTIVE', 'Active / Open for Application'
+        UPCOMING = 'UPCOMING', 'Upcoming'
+        EXPIRED = 'EXPIRED', 'Application Closed'
+
+    title = models.CharField(max_length=255)
+    sponsoring_agency = models.CharField(max_length=255, help_text="e.g. AICTE / Ministry of Education, Amazon India, ICICI Bank")
+    domain = models.CharField(max_length=30, choices=Domain.choices, default=Domain.ALL)
+    scheme_type = models.CharField(max_length=30, choices=SchemeType.choices, default=SchemeType.SCHOLARSHIP)
+    target_gender = models.CharField(max_length=20, choices=TargetGender.choices, default=TargetGender.FEMALE_ONLY)
+    benefit_summary = models.CharField(max_length=255, help_text="e.g. INR 50,000/year + Tuition Waiver")
+    description = models.TextField(help_text="Full program guidelines, eligibility, and deliverables")
+    eligible_degrees = models.JSONField(default=list, blank=True, help_text="e.g. ['B.Tech', 'BCA', 'B.Com', 'MBA', 'B.Des']")
+    min_cgpa = models.FloatField(null=True, blank=True)
+    application_deadline = models.DateTimeField(null=True, blank=True)
+    official_portal_url = models.URLField(max_length=500, help_text="Official portal or registration URL")
+    status = models.CharField(max_length=20, choices=SchemeStatus.choices, default=SchemeStatus.ACTIVE)
+    badge_color = models.CharField(max_length=30, default="purple", help_text="UI badge accent color")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'skillsetu_government_schemes'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.title} [{self.domain}] ({self.status})"
 
 class TestSession(models.Model):
     student_profile = models.ForeignKey(StudentProfile, on_delete=models.CASCADE, related_name="test_sessions")

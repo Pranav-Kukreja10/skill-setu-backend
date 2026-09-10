@@ -77,3 +77,32 @@ class InstitutionSchemaUnitTests(SimpleTestCase):
         )
         self.assertEqual(gap_report.deficit_skills[0].deficit_percentage, 40.0)
         self.assertEqual(len(gap_report.faculty_recommendations), 1)
+
+    def test_learning_program_and_faculty_collaboration_schema(self):
+        from recruiters.schemas import LearningProgramOut
+        from institutions.schemas import FacultyOpportunityApplyIn
+
+        program = LearningProgramOut(
+            id=1,
+            company_id=1,
+            company_name="Google India",
+            title="Google Cloud Architecture & Kubernetes Production Systems",
+            program_type="TRAINING_PROGRAM",
+            target_audience="ALL",
+            description="Production cloud engineering curriculum",
+            skills_covered=["Cloud", "Kubernetes"],
+            duration="6 Weeks",
+            mode="ONLINE",
+            is_certified=True,
+            created_at=datetime.now()
+        )
+        self.assertEqual(program.company_name, "Google India")
+        self.assertTrue(program.is_certified)
+
+        apply_in = FacultyOpportunityApplyIn(
+            statement_of_purpose="Integrating EV battery management into academic syllabus.",
+            research_areas=["Battery Management", "Thermal Dynamics"]
+        )
+        self.assertEqual(len(apply_in.research_areas), 2)
+        self.assertIn("Battery Management", apply_in.research_areas)
+

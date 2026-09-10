@@ -1,6 +1,7 @@
 from ninja import Router
 from typing import List, Optional, Dict, Any
 from django.db import models
+from django.db.models import Prefetch, Count
 from accounts.models import User
 from accounts.security import AcademiaAuth
 from students.models import StudentProfile
@@ -225,9 +226,167 @@ def update_faculty_profile(request, payload: FacultyProfileUpdateIn):
 
 
 # ---------------------------------------------------------------------------
+# PS REQUIREMENT: FACULTY INTERNSHIPS, FDPs & COLLABORATIVE RESEARCH
+# ---------------------------------------------------------------------------
+from recruiters.schemas import JobListingOut
+from institutions.schemas import FacultyOpportunityApplyIn
+from students.models import Notification
+
+FACULTY_ROLE_TYPES = [
+    JobListing.RoleType.FACULTY_INTERNSHIP,
+    JobListing.RoleType.FDP,
+    JobListing.RoleType.INDUSTRIAL_TRAINING,
+    JobListing.RoleType.CONSULTANCY,
+    JobListing.RoleType.RESEARCH_PROJECT,
+    JobListing.RoleType.WORKSHOP,
+    JobListing.RoleType.GUEST_LECTURE
+]
+
+def _listing_to_schema(listing: JobListing) -> JobListingOut:
+    company = listing.company
+    recruiter = listing.recruiter
+    user = recruiter.user if recruiter else None
+    return JobListingOut(
+        id=listing.id,
+        company_id=company.id,
+        company_name=company.name,
+        company_logo=company.branding_logo_url or "",
+        company_website=company.website or "",
+        company_headquarters=company.headquarters or "",
+        recruiter_id=recruiter.id if recruiter else 0,
+        recruiter_name=user.username if user else "Recruiter",
+        title=listing.title,
+        role_type=listing.role_type,
+        target_audience=listing.target_audience,
+        status=listing.status,
+        stipend_or_ctc=listing.stipend_or_ctc,
+        location=listing.location,
+        is_remote=listing.is_remote,
+        application_deadline=listing.application_deadline,
+        tenure=listing.tenure or "",
+        open_positions=listing.open_positions,
+        required_skills=listing.required_skills or [],
+        eligibility_criteria=listing.eligibility_criteria or {},
+        description=listing.description,
+        applications_count=getattr(listing, 'applications_count', None) if getattr(listing, 'applications_count', None) is not None else (listing.applications.count() if hasattr(listing, 'applications') else 0),
+        created_at=listing.created_at,
+        updated_at=listing.updated_at
+    )
+
+@institutions_router.get("/faculty/opportunities", response=List[JobListingOut], auth=AcademiaAuth())
+def list_faculty_opportunities(
+    request,
+    role_type: Optional[str] = None,
+    location: Optional[str] = None,
+    is_remote: Optional[bool] = None,
+    q: Optional[str] = None
+):
+    """
+    Academicians & Faculty Industry Exposure Discovery (PS Requirement):
+    Browse Faculty Internships, Faculty Development Programs (FDPs),
+    Industrial Training, Corporate Consultancy, and Collaborative Research Projects.
+    """
+    qs = JobListing.objects.filter(
+        status=JobListing.ListingStatus.PUBLISHED
+    ).filter(
+        models.Q(target_audience__in=[JobListing.TargetAudience.FACULTY, JobListing.TargetAudience.ALL]) |
+        models.Q(role_type__in=FACULTY_ROLE_TYPES)
+    ).select_related('company', 'recruiter__user').annotate(applications_count=Count('applications'))
+
+    if role_type:
+        qs = qs.filter(role_type__iexact=role_type)
+    if location:
+        qs = qs.filter(location__icontains=location)
+    if is_remote is not None:
+        qs = qs.filter(is_remote=is_remote)
+    if q:
+        qs = qs.filter(
+            models.Q(title__icontains=q) |
+            models.Q(description__icontains=q) |
+            models.Q(company__name__icontains=q)
+        )
+
+    return [_listing_to_schema(l) for l in qs]
+
+
+@institutions_router.post("/faculty/opportunities/{listing_id}/apply", response={200: dict, 400: dict, 404: dict}, auth=AcademiaAuth())
+def apply_faculty_opportunity(request, listing_id: int, payload: Optional[FacultyOpportunityApplyIn] = None):
+    """
+    Faculty 1-Click Application / Expression of Interest:
+    Submit application for Faculty Internship, FDP residency, consultancy, or collaborative research.
+    Dispatches corporate recruiter alert with faculty credentials.
+    """
+    listing = JobListing.objects.select_related('company', 'recruiter__user').filter(id=listing_id).first()
+    if not listing:
+        return 404, {"message": "Opportunity listing not found."}
+    if listing.status != JobListing.ListingStatus.PUBLISHED:
+        return 400, {"message": "This opportunity is not currently accepting applications."}
+
+    user = request.auth
+    fp, _ = FacultyProfile.objects.get_or_create(user=user)
+    inst_name = fp.institution.name if fp.institution else "Academic Institution"
+
+    # Notify corporate recruiter
+    if listing.recruiter and listing.recruiter.user:
+        sop_text = f" Statement of Purpose: '{payload.statement_of_purpose}'" if payload and payload.statement_of_purpose else ""
+        Notification.objects.create(
+            user=listing.recruiter.user,
+            title=f"Faculty Collaboration Application: {listing.title}",
+            message=f"Prof. {user.username} ({fp.designation} at {inst_name}) applied for '{listing.title}'.{sop_text}",
+            notification_type=Notification.NotificationType.APPLICATION_REVIEW,
+            related_listing_id=listing.id
+        )
+
+    # Confirmation notification to faculty
+    Notification.objects.create(
+        user=user,
+        title=f"Application Submitted: {listing.title}",
+        message=f"Your application for '{listing.title}' at '{listing.company.name}' has been successfully transmitted to the industry coordinator.",
+        notification_type=Notification.NotificationType.STATUS_CHANGE,
+        related_listing_id=listing.id
+    )
+
+    return 200, {
+        "success": True,
+        "message": f"Faculty application for '{listing.title}' successfully submitted to {listing.company.name}.",
+        "opportunity_id": listing.id,
+        "institution": inst_name
+    }
+
+
+@institutions_router.get("/faculty/my-collaborations", response=List[Dict[str, Any]], auth=AcademiaAuth())
+def get_faculty_collaborations(request):
+    """
+    Faculty Collaboration Tracker:
+    Lists enrolled Industry Learning Programs, Workshops, and FDPs for the authenticated faculty member.
+    """
+    user = request.auth
+    fp, _ = FacultyProfile.objects.get_or_create(user=user)
+    
+    from recruiters.models import LearningProgram
+    enrolled_programs = LearningProgram.objects.filter(enrolled_faculty=fp).select_related('company')
+
+    results = []
+    for p in enrolled_programs:
+        results.append({
+            "program_id": p.id,
+            "title": p.title,
+            "company_name": p.company.name,
+            "program_type": p.program_type,
+            "duration": p.duration,
+            "mode": p.mode,
+            "is_certified": p.is_certified,
+            "start_date": p.start_date.isoformat() if p.start_date else None,
+            "status": "ENROLLED"
+        })
+    return results
+
+
+# ---------------------------------------------------------------------------
 # ROUTER 2: IDEMPOTENT INSTITUTIONAL PLACEMENT REPORTING (SIH COMPLIANT)
 # ---------------------------------------------------------------------------
 placement_router = Router(tags=["Placement Reporting"], auth=AcademiaAuth())
+
 
 @placement_router.get("/overview", response=PlacementOverviewOut)
 def get_placement_overview(request):
@@ -313,17 +472,21 @@ def get_student_roster_status(request, department: Optional[str] = None):
     Faculty Student Roster:
     Comprehensive list of students, verified scores, placement statuses, and received offers.
     """
-    qs = StudentProfile.objects.select_related("user").all()
+    offered_prefetch = Prefetch(
+        'job_applications',
+        queryset=JobApplication.objects.filter(
+            status=JobApplication.ApplicationStatus.OFFERED
+        ).select_related("listing__company"),
+        to_attr='prefetched_offers'
+    )
+    qs = StudentProfile.objects.select_related("user").prefetch_related(offered_prefetch).all()
     if department:
         qs = qs.filter(department__iexact=department)
 
     roster = []
     for p in qs:
-        # Fetch active offers for student
-        offer_apps = JobApplication.objects.filter(
-            student=p,
-            status=JobApplication.ApplicationStatus.OFFERED
-        ).select_related("listing__company")
+        # Pre-fetched active offers for student (0 extra SQL queries)
+        offer_apps = getattr(p, 'prefetched_offers', [])
 
         offers = []
         for oa in offer_apps:

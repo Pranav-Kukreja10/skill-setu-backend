@@ -154,7 +154,7 @@ def compute_skill_gap_roadmap(
     Produces actionable 'Skills to build next' with estimated match score gain (+X% boost)
     and practical project suggestions.
     """
-    listings_qs = JobListing.objects.filter(status=JobListing.ListingStatus.PUBLISHED)
+    listings_qs = JobListing.objects.filter(status=JobListing.ListingStatus.PUBLISHED).only('id', 'title', 'search_corpus', 'required_skills')
     if target_role and target_role.strip():
         role_filter = target_role.strip().lower()
         matching_listings = list(listings_qs.filter(

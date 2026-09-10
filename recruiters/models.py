@@ -1,6 +1,6 @@
 from django.db import models
 from django.conf import settings
-from pgvector.django import VectorField
+from pgvector.django import VectorField, HnswIndex
 
 class Company(models.Model):
     name = models.CharField(max_length=255, unique=True)
@@ -56,9 +56,24 @@ class RecruiterProfile(models.Model):
 
 class JobListing(models.Model):
     class RoleType(models.TextChoices):
-        FULL_TIME = 'FULL_TIME', 'Full-Time'
-        INTERNSHIP = 'INTERNSHIP', 'Internship'
+        FULL_TIME = 'FULL_TIME', 'Full-Time Job'
+        INTERNSHIP = 'INTERNSHIP', 'Student Internship'
+        APPRENTICESHIP = 'APPRENTICESHIP', 'Apprenticeship'
         CONTRACT = 'CONTRACT', 'Contract'
+        LIVE_PROJECT = 'LIVE_PROJECT', 'Live Industry Project'
+        FACULTY_INTERNSHIP = 'FACULTY_INTERNSHIP', 'Faculty Internship'
+        FDP = 'FDP', 'Faculty Development Program (FDP)'
+        INDUSTRIAL_TRAINING = 'INDUSTRIAL_TRAINING', 'Industrial Training'
+        CONSULTANCY = 'CONSULTANCY', 'Consultancy Opportunity'
+        RESEARCH_PROJECT = 'RESEARCH_PROJECT', 'Collaborative Research Project'
+        WORKSHOP = 'WORKSHOP', 'Industry Workshop'
+        GUEST_LECTURE = 'GUEST_LECTURE', 'Guest Lecture / Mentorship'
+        INNOVATION_CHALLENGE = 'INNOVATION_CHALLENGE', 'Innovation Challenge / Hackathon'
+
+    class TargetAudience(models.TextChoices):
+        STUDENT = 'STUDENT', 'Students & Candidates'
+        FACULTY = 'FACULTY', 'Academicians & Faculty'
+        ALL = 'ALL', 'Students & Faculty'
 
     class ListingStatus(models.TextChoices):
         DRAFT = 'DRAFT', 'Draft'
@@ -76,15 +91,16 @@ class JobListing(models.Model):
         on_delete=models.CASCADE,
         related_name='job_listings'
     )
-    title = models.CharField(max_length=255, help_text="e.g. Junior Backend Engineer, Robotics Intern")
-    role_type = models.CharField(max_length=20, choices=RoleType.choices, default=RoleType.FULL_TIME)
+    title = models.CharField(max_length=255, help_text="e.g. Junior Backend Engineer, Robotics Intern, EV Powertrain FDP")
+    role_type = models.CharField(max_length=30, choices=RoleType.choices, default=RoleType.FULL_TIME)
+    target_audience = models.CharField(max_length=20, choices=TargetAudience.choices, default=TargetAudience.STUDENT)
     status = models.CharField(max_length=20, choices=ListingStatus.choices, default=ListingStatus.DRAFT)
     
-    stipend_or_ctc = models.CharField(max_length=100, help_text="e.g. INR 40,000/month or 12 - 16 LPA")
+    stipend_or_ctc = models.CharField(max_length=100, help_text="e.g. INR 40,000/month, 12 - 16 LPA, or Sponsored Grant")
     location = models.CharField(max_length=255, help_text="e.g. Bengaluru, Remote, Pune (Hybrid)")
     is_remote = models.BooleanField(default=False, help_text="Flag indicating remote work option")
     application_deadline = models.DateTimeField(null=True, blank=True, help_text="Last date to submit applications")
-    tenure = models.CharField(max_length=100, blank=True, help_text="e.g. 6 Months, Permanent")
+    tenure = models.CharField(max_length=100, blank=True, help_text="e.g. 6 Months, Permanent, 2 Weeks")
     open_positions = models.IntegerField(default=1)
     
     # Skills and requirements
@@ -96,6 +112,20 @@ class JobListing(models.Model):
     )
     description = models.TextField(help_text="Detailed job description, responsibilities, and perks")
     
+    # Diversity, Equity & Inclusion (DEI) attributes
+    is_diversity_drive = models.BooleanField(default=False, help_text="Designates an affirmative action or diversity hiring initiative")
+    target_gender = models.CharField(
+        max_length=20,
+        choices=[("ALL", "All Eligible"), ("FEMALE_ONLY", "Women Only / Female Candidates"), ("PREFER_DIVERSITY", "Diversity Preference")],
+        default="ALL",
+        help_text="Target demographic for the posting"
+    )
+    dei_initiatives = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="DEI perks & programs e.g. ['Women in Tech Mentorship', 'Inclusive Childcare Support', 'Equal Pay Certified']"
+    )
+    
     # Denormalized NLP search corpus & 384-dim BGE dense embedding
     search_corpus = models.TextField(blank=True, default='')
     embedding = VectorField(dimensions=384, null=True, blank=True)
@@ -106,9 +136,18 @@ class JobListing(models.Model):
     class Meta:
         db_table = 'skillsetu_job_listings'
         ordering = ['-created_at']
+        indexes = [
+            HnswIndex(
+                name='job_listing_hnsw_idx',
+                fields=['embedding'],
+                m=16,
+                ef_construction=64,
+                opclasses=['vector_cosine_ops'],
+            ),
+        ]
 
     def __str__(self):
-        return f"{self.title} @ {self.company.name} ({self.status})"
+        return f"{self.title} @ {self.company.name} ({self.status}) [{self.role_type}]"
 
 class JobApplication(models.Model):
     class ApplicationStatus(models.TextChoices):
@@ -118,6 +157,12 @@ class JobApplication(models.Model):
         INTERVIEW = 'INTERVIEW', 'Interview'
         OFFERED = 'OFFERED', 'Offered'
         REJECTED = 'REJECTED', 'Rejected'
+
+    class InternshipStatus(models.TextChoices):
+        NOT_STARTED = 'NOT_STARTED', 'Not Started'
+        IN_PROGRESS = 'IN_PROGRESS', 'In Progress'
+        COMPLETED = 'COMPLETED', 'Completed'
+        TERMINATED = 'TERMINATED', 'Terminated'
 
     listing = models.ForeignKey(
         JobListing,
@@ -143,6 +188,25 @@ class JobApplication(models.Model):
         help_text="Chronological audit trail: [{'status': '...', 'timestamp': '...', 'note': '...'}]"
     )
 
+    # PS Requirement: Progress tracking, mentor feedback, and internship completion records
+    internship_status = models.CharField(
+        max_length=30,
+        choices=InternshipStatus.choices,
+        default=InternshipStatus.NOT_STARTED,
+        help_text="Live lifecycle status of the internship/training"
+    )
+    mentor_name = models.CharField(max_length=150, blank=True, default="", help_text="Assigned industry mentor / lead")
+    mentor_designation = models.CharField(max_length=150, blank=True, default="", help_text="Mentor corporate designation")
+    mentor_feedback = models.TextField(blank=True, default="", help_text="Qualitative mentor review and evaluation remarks")
+    mentor_rating = models.FloatField(null=True, blank=True, help_text="Performance rating on a scale of 1.0 to 5.0")
+    completion_certificate_url = models.CharField(max_length=500, blank=True, default="", help_text="Verified credential / certificate URL")
+    internship_report_url = models.CharField(max_length=500, blank=True, default="", help_text="Student submitted final internship report URL")
+    weekly_progress_logs = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Weekly milestone updates: [{'week': 1, 'milestone': '...', 'hours': 40, 'mentor_remark': '...'}]"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -153,3 +217,56 @@ class JobApplication(models.Model):
 
     def __str__(self):
         return f"{self.student.user.username} -> {self.listing.title} [{self.status}]"
+
+
+class LearningProgram(models.Model):
+    """
+    PS Requirement: Industry Learning Programs
+    Companies can publish training programs, certification courses, workshops,
+    and mentorship initiatives to help students and faculty acquire in-demand skills.
+    """
+    class ProgramType(models.TextChoices):
+        TRAINING_PROGRAM = 'TRAINING_PROGRAM', 'Industry Training Program'
+        CERTIFICATION_COURSE = 'CERTIFICATION_COURSE', 'Certification Course'
+        WORKSHOP = 'WORKSHOP', 'Hands-on Workshop'
+        MENTORSHIP = 'MENTORSHIP', 'Mentorship Initiative'
+        GUEST_LECTURE = 'GUEST_LECTURE', 'Executive Guest Lecture'
+        INNOVATION_CHALLENGE = 'INNOVATION_CHALLENGE', 'Innovation Challenge / Hackathon'
+
+    class Mode(models.TextChoices):
+        ONLINE = 'ONLINE', 'Online'
+        OFFLINE = 'OFFLINE', 'Offline / On-Campus'
+        HYBRID = 'HYBRID', 'Hybrid'
+
+    class TargetAudience(models.TextChoices):
+        STUDENT = 'STUDENT', 'Students & Candidates'
+        FACULTY = 'FACULTY', 'Academicians & Faculty'
+        ALL = 'ALL', 'Students & Faculty'
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='learning_programs')
+    title = models.CharField(max_length=255)
+    program_type = models.CharField(max_length=30, choices=ProgramType.choices, default=ProgramType.WORKSHOP)
+    target_audience = models.CharField(max_length=20, choices=TargetAudience.choices, default=TargetAudience.ALL)
+    description = models.TextField(help_text="Detailed syllabus, prerequisites, and learning outcomes")
+    skills_covered = models.JSONField(default=list, help_text="e.g. ['Cloud Architecture', 'EV Powertrain', 'Financial Modeling']")
+    instructor_or_mentor = models.CharField(max_length=200, blank=True, help_text="Name & title of industry leader or mentor")
+    duration = models.CharField(max_length=100, help_text="e.g. 4 Weeks, 2 Days, 40 Hours")
+    mode = models.CharField(max_length=20, choices=Mode.choices, default=Mode.ONLINE)
+    registration_deadline = models.DateTimeField(null=True, blank=True)
+    start_date = models.DateTimeField(null=True, blank=True)
+    is_certified = models.BooleanField(default=True, help_text="Awards recognized industry certificate upon completion")
+    branding_banner_url = models.CharField(max_length=500, blank=True, default="")
+    
+    enrolled_students = models.ManyToManyField('students.StudentProfile', blank=True, related_name='enrolled_learning_programs')
+    enrolled_faculty = models.ManyToManyField('institutions.FacultyProfile', blank=True, related_name='enrolled_learning_programs')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'skillsetu_learning_programs'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.title} by {self.company.name} [{self.program_type}]"
+

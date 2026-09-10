@@ -4,34 +4,33 @@ from django.conf import settings
 from accounts.models import User 
 
 class JWTAuth(HttpBearer):
+    allowed_roles = None  # None means any authenticated role is accepted
+
     def authenticate(self, request, token): 
         try: 
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-            user = User.objects.get(id=payload["user_id"]) 
+            token_role = payload.get("role")
+            
+            # Stateless Role Check: Reject unauthorized roles immediately with 0 database queries
+            if self.allowed_roles is not None:
+                if token_role not in self.allowed_roles:
+                    return None
+
+            user = User.objects.only("id", "username", "email", "role", "auth_provider", "avatar_url", "phone_number").get(id=payload["user_id"]) 
+            request.jwt_payload = payload
+            user.jwt_payload = payload
             return user 
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist):
             return None
 
 class RecruiterAuth(JWTAuth):
-    def authenticate(self, request, token):
-        user = super().authenticate(request, token)
-        if user and user.role in [User.Role.RECRUITER, User.Role.ADMIN]:
-            return user
-        return None
+    allowed_roles = [User.Role.RECRUITER, User.Role.ADMIN]
 
 class StudentAuth(JWTAuth):
-    def authenticate(self, request, token):
-        user = super().authenticate(request, token)
-        if user and user.role in [User.Role.STUDENT, User.Role.CANDIDATE, User.Role.ADMIN]:
-            return user
-        return None
+    allowed_roles = [User.Role.STUDENT, User.Role.CANDIDATE, User.Role.ADMIN]
 
 # Alias CandidateAuth to StudentAuth for seamless candidate/job-seeker parity
 CandidateAuth = StudentAuth
 
 class AcademiaAuth(JWTAuth):
-    def authenticate(self, request, token):
-        user = super().authenticate(request, token)
-        if user and user.role in [User.Role.ACADEMIA, User.Role.ADMIN]:
-            return user
-        return None
+    allowed_roles = [User.Role.ACADEMIA, User.Role.ADMIN]

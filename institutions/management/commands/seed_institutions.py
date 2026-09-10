@@ -55,6 +55,23 @@ class Command(BaseCommand):
                     {"name": "Commerce & Financial Studies", "code": "COM", "head_of_department": "Dr. Simrit Kaur"},
                     {"name": "Economics & Business Analytics", "code": "ECO", "head_of_department": "Dr. Rachna Jawa"}
                 ]
+            },
+            {
+                "name": "Chitkara University, Punjab",
+                "code": "AISHE-U-0374",
+                "institution_type": Institution.InstitutionType.UNIVERSITY,
+                "state": "Punjab",
+                "city": "Rajpura / Chandigarh",
+                "website": "https://www.chitkara.edu.in",
+                "nirf_rank": 15,
+                "is_verified": True,
+                "branding_logo_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cb/Chitkara_University_logo.png/220px-Chitkara_University_logo.png",
+                "departments": [
+                    {"name": "Computer Science & Engineering", "code": "CSE", "head_of_department": "Dr. Rajneesh Talwar"},
+                    {"name": "Electronics & Communication Engineering", "code": "ECE", "head_of_department": "Dr. Sandeep Arora"},
+                    {"name": "Mechanical Engineering", "code": "MECH", "head_of_department": "Dr. Gurwinder Singh"},
+                    {"name": "Chitkara Business School", "code": "CBS", "head_of_department": "Dr. Babita Singla"}
+                ]
             }
         ]
 
@@ -98,4 +115,35 @@ class Command(BaseCommand):
             )
             self.stdout.write(self.style.SUCCESS(f"  [Faculty Link] {faculty_user.username} -> {nitk.name} ({fp.designation})"))
 
+        # 2.1 CHITKARA FACULTY PERSONA (DR. RAJNEESH TALWAR)
+        chitkara = Institution.objects.filter(name__icontains="Chitkara").first()
+        if chitkara:
+            c_dept = Department.objects.filter(institution=chitkara, name__icontains="Computer Science").first()
+            talwar_user, _ = User.objects.get_or_create(
+                username="dr_talwar",
+                defaults={
+                    "email": "rajneesh.talwar@chitkara.edu.in",
+                    "role": User.Role.ACADEMIA,
+                    "first_name": "Rajneesh",
+                    "last_name": "Talwar",
+                    "phone_number": "+919876500001"
+                }
+            )
+            talwar_user.set_password("password123")
+            talwar_user.save()
+
+            fp_t, _ = FacultyProfile.objects.update_or_create(
+                user=talwar_user,
+                defaults={
+                    "institution": chitkara,
+                    "department": c_dept,
+                    "designation": "Dean of Academic Collaborations & Industry Engagement",
+                    "employee_id": "CU-FAC-1042",
+                    "contact_phone": "+91 98765 00001",
+                    "is_institution_admin": True
+                }
+            )
+            self.stdout.write(self.style.SUCCESS(f"  [Faculty Link] {talwar_user.username} -> {chitkara.name} ({fp_t.designation})"))
+
         self.stdout.write(self.style.SUCCESS("[OK] Successfully seeded verified institutions, academic departments & faculty!"))
+

@@ -1,3 +1,4 @@
+from unittest.mock import patch
 from django.test import SimpleTestCase
 from students.services import (
     build_skills_matrix,
@@ -86,3 +87,165 @@ class ScoringAndMathFormulasTest(SimpleTestCase):
         # Total = 36.0 + 21.0 + 12.75 + 8.5 = 78.25
         score, breakdown = compute_profile_strength(mock_profile)
         self.assertAlmostEqual(score, 78.25, places=2)
+
+    def test_digital_portfolio_and_internship_schemas(self):
+        from students.schemas import (
+            StudentPortfolioOutSchema,
+            MilestoneLogCreateIn,
+            ActiveInternshipDetailOut
+        )
+        milestone = MilestoneLogCreateIn(
+            week_number=1,
+            milestone_summary="Implemented zero-copy serialization driver",
+            hours_logged=40,
+            deliverables_url="https://github.com/alexdev99/driver"
+        )
+        self.assertEqual(milestone.week_number, 1)
+        self.assertEqual(milestone.hours_logged, 40)
+
+        internship = ActiveInternshipDetailOut(
+            application_id=1,
+            listing_id=10,
+            title="Backend Systems Intern",
+            company_name="Google India",
+            location="Bengaluru",
+            stipend_or_ctc="INR 50,000/month",
+            role_type="INTERNSHIP",
+            internship_status="IN_PROGRESS",
+            mentor_name="Dr. Arvind Varma",
+            mentor_rating=5.0,
+            weekly_progress_logs=[milestone.dict()]
+        )
+        self.assertEqual(internship.mentor_rating, 5.0)
+        self.assertEqual(len(internship.weekly_progress_logs), 1)
+
+        portfolio = StudentPortfolioOutSchema(
+            id=1,
+            username="alex_dev",
+            email="alex@university.edu",
+            overall_confidence_score=85.0,
+            profile_strength_score=82.5,
+            placement_status="PLACED",
+            is_verified=True,
+            certifications=[{"name": "AWS PSA", "issuer": "AWS"}],
+            achievements=[{"title": "SIH 2024 Finalist", "year": 2024}],
+            academic_records=[{"semester": 1, "sgpa": 9.2, "credits": 24}],
+            active_internships=[internship.dict()]
+        )
+        self.assertEqual(portfolio.username, "alex_dev")
+        self.assertEqual(len(portfolio.achievements), 1)
+        self.assertEqual(portfolio.achievements[0]["title"], "SIH 2024 Finalist")
+
+    @patch.object(ResilientGrader, "_grade_viva_via_gemini")
+    def test_retest_and_fault_acknowledgment_on_grading_failure(self, mock_grade_viva):
+        """
+        Guarantees that on external AI viva grading failures:
+        - NEVER award unearned/free scores (cognitive_score=0, viva_avg=0, confidence_score=0)
+        - Transparently acknowledges the fault on our side
+        - Retest is mandated and required
+        """
+        mock_grade_viva.return_value = (None, "Oops! Service disruption on our end.")
+
+        original_questions = [
+            {
+                "id": 1,
+                "type": "MCQ",
+                "question_text": "What is Python?",
+                "correct_answer": "Language",
+                "explanation": "Interpreted language"
+            },
+            {
+                "id": 2,
+                "type": "VIVA",
+                "question_text": "Explain CAP Theorem in distributed databases.",
+                "explanation": "Consistency, Availability, Partition tolerance trade-offs"
+            }
+        ]
+        submitted_answers = [
+            {"id": 1, "answer_text": "Language", "time_taken_seconds": 10},
+            {"id": 2, "answer_text": "Network partitions require choosing between consistency and availability.", "time_taken_seconds": 45}
+        ]
+
+        result = ResilientGrader.evaluate_test_submission(submitted_answers, original_questions, resume_rating=85.0)
+
+        self.assertFalse(result["success"])
+        self.assertTrue(result["retest_required"])
+        self.assertTrue(result["fault_acknowledged"])
+        self.assertEqual(result["cognitive_score"], 0)
+        self.assertEqual(result["viva_average"], 0)
+        self.assertEqual(result["confidence_score"], 0)
+        self.assertIn("unexpected interruption on our end", result["message"])
+
+    def test_preferences_schema_defaults_and_personalization(self):
+        from students.schemas import (
+            StudentPreferencesSchema,
+            StudentPreferencesUpdateIn,
+        )
+        prefs = StudentPreferencesSchema()
+        self.assertTrue(prefs.notifications.opportunity_alerts)
+        self.assertTrue(prefs.notifications.scheme_alerts)
+        self.assertTrue(prefs.features.show_affirmative_action_schemes)
+        self.assertTrue(prefs.features.show_diversity_job_badges)
+        self.assertTrue(prefs.privacy.participate_in_diversity_hiring)
+
+        update_payload = StudentPreferencesUpdateIn(
+            notifications={"scheme_alerts": False},
+            features={"show_affirmative_action_schemes": False}
+        )
+        self.assertFalse(update_payload.notifications["scheme_alerts"])
+        self.assertFalse(update_payload.features["show_affirmative_action_schemes"])
+
+    def test_multi_domain_government_schemes_schema(self):
+        from students.schemas import GovernmentSchemeOutSchema
+        from datetime import datetime
+
+        scheme = GovernmentSchemeOutSchema(
+            id=1,
+            title="AICTE Pragati Scholarship for Girls",
+            sponsoring_agency="AICTE / Ministry of Education",
+            domain="TECH",
+            scheme_type="SCHOLARSHIP",
+            target_gender="FEMALE_ONLY",
+            benefit_summary="INR 50,000/year",
+            description="Government scholarship for female technical students.",
+            eligible_degrees=["B.Tech", "MCA"],
+            min_cgpa=6.5,
+            application_deadline=datetime(2026, 12, 31),
+            official_portal_url="https://scholarships.gov.in",
+            status="ACTIVE",
+            badge_color="emerald",
+            is_eligible=True,
+            match_reasons=["Eligible: Female candidate in B.Tech"],
+            created_at=datetime(2026, 1, 1)
+        )
+        self.assertEqual(scheme.domain, "TECH")
+        self.assertTrue(scheme.is_eligible)
+        self.assertEqual(scheme.badge_color, "emerald")
+
+    def test_dei_job_discovery_schema(self):
+        from students.schemas import JobDiscoveryItemOut
+        from datetime import datetime
+
+        item = JobDiscoveryItemOut(
+            id=101,
+            title="Cloud & AI Diversity Associate",
+            company_id=1,
+            company_name="Microsoft India",
+            role_type="FULL_TIME",
+            location="Bengaluru",
+            is_remote=True,
+            stipend_or_ctc="18 - 24 LPA",
+            open_positions=5,
+            required_skills=["azure", "python"],
+            description="Diversity accelerator for women engineers.",
+            is_diversity_drive=True,
+            target_gender="FEMALE_ONLY",
+            dei_initiatives=["TechSaksham Partner", "Executive Mentoring"],
+            created_at=datetime(2026, 1, 1)
+        )
+        self.assertTrue(item.is_diversity_drive)
+        self.assertEqual(item.target_gender, "FEMALE_ONLY")
+        self.assertEqual(len(item.dei_initiatives), 2)
+
+
+

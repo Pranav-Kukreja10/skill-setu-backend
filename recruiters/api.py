@@ -8,14 +8,15 @@ from accounts.models import User
 from accounts.security import JWTAuth, RecruiterAuth, StudentAuth, AcademiaAuth
 from students.models import StudentProfile, IndustrySector, Notification
 from students.services import compute_profile_strength
-from recruiters.models import Company, RecruiterProfile, JobListing, JobApplication
+from recruiters.models import Company, RecruiterProfile, JobListing, JobApplication, LearningProgram
 from recruiters.schemas import (
     CompanyCreateIn, CompanyUpdateIn, CompanyOut,
     RecruiterProfileUpdateIn, RecruiterProfileOut,
     JobListingCreateIn, JobListingUpdateIn, JobListingOut,
     CandidateJobSearchIn, CandidateJobSearchResponseOut, CandidateJobSearchResultOut,
     JobApplicationApplyIn, JobApplicationStatusUpdateIn, JobApplicationOut, StudentMyApplicationOut,
-    ApplicantStudentOut,
+    ApplicantStudentOut, InternshipProgressUpdateIn, InternshipMilestoneLogIn,
+    LearningProgramOut, LearningProgramCreateIn,
     PlacementOverviewOut, BranchWiseReportOut, BranchPlacementStatOut,
     StudentRosterReportOut, StudentPlacementStatusOut, StudentOfferDetail,
     SkillDeficitItemOut, SkillGapAnalysisOut, InDemandSkillItemOut, InDemandSkillsOut, PlacementTrendsOut
@@ -191,8 +192,10 @@ def update_company(request, payload: CompanyUpdateIn):
 listings_router = Router(tags=["Job & Internship Listings"])
 
 def _listing_to_schema(listing: JobListing) -> JobListingOut:
-    apps_count = getattr(listing, 'apps_count', None)
+    apps_count = getattr(listing, 'applications_count', None)
     if apps_count is None:
+        apps_count = getattr(listing, 'apps_count', None)
+    if apps_count is None and hasattr(listing, 'applications'):
         apps_count = listing.applications.count()
     return JobListingOut(
         id=listing.id,
@@ -215,7 +218,7 @@ def _listing_to_schema(listing: JobListing) -> JobListingOut:
         required_skills=listing.required_skills or [],
         eligibility_criteria=listing.eligibility_criteria or {},
         description=listing.description,
-        applications_count=apps_count,
+        applications_count=apps_count or 0,
         created_at=listing.created_at,
         updated_at=listing.updated_at
     )
@@ -226,20 +229,25 @@ def dispatch_new_opportunity_notifications(listing: JobListing) -> int:
     Scans active student profiles and matches them against the published listing.
     If a student has a skill overlap (>= 25%) or matching target roles, sends a
     NEW_OPPORTUNITY notification.
+    Uses bulk queries to completely eliminate N+1 overhead.
     """
     if listing.status != JobListing.ListingStatus.PUBLISHED:
         return 0
 
     req_skills = [s.lower().strip() for s in (listing.required_skills or [])]
     students = StudentProfile.objects.select_related('user').all()
-    count = 0
-    for s in students:
-        already_notified = Notification.objects.filter(
-            user=s.user,
+
+    # Pre-fetch all user IDs who have already received this notification in 1 query
+    already_notified_user_ids = set(
+        Notification.objects.filter(
             notification_type=Notification.NotificationType.NEW_OPPORTUNITY,
             related_listing_id=listing.id
-        ).exists()
-        if already_notified:
+        ).values_list('user_id', flat=True)
+    )
+
+    notifications_to_create = []
+    for s in students:
+        if s.user_id in already_notified_user_ids:
             continue
 
         cand_skills = [sk.lower().strip() for sk in (s.skills_matrix or {}).keys()]
@@ -249,15 +257,18 @@ def dispatch_new_opportunity_notifications(listing: JobListing) -> int:
             for tr in (s.target_roles or [])
         )
         if overlap >= 0.25 or title_match:
-            Notification.objects.create(
+            notifications_to_create.append(Notification(
                 user=s.user,
                 title=f"New Opportunity: {listing.title} at {listing.company.name}",
                 message=f"A new {listing.role_type.replace('_', ' ').title()} matching your skill profile was just posted: '{listing.title}' ({listing.stipend_or_ctc}, {listing.location}). Apply now!",
                 notification_type=Notification.NotificationType.NEW_OPPORTUNITY,
                 related_listing_id=listing.id
-            )
-            count += 1
-    return count
+            ))
+
+    if notifications_to_create:
+        Notification.objects.bulk_create(notifications_to_create)
+
+    return len(notifications_to_create)
 
 @listings_router.post("/", response={201: JobListingOut, 400: dict}, auth=RecruiterAuth())
 def create_job_listing(request, payload: JobListingCreateIn):
@@ -527,16 +538,25 @@ def _application_to_schema(app: JobApplication, blind: bool = False) -> JobAppli
         recruiter_notes=app.recruiter_notes or "",
         interview_date=getattr(app, 'interview_date', None),
         status_history=app.status_history or [],
+        internship_status=app.internship_status,
+        mentor_name=app.mentor_name or "",
+        mentor_designation=app.mentor_designation or "",
+        mentor_feedback=app.mentor_feedback or "",
+        mentor_rating=app.mentor_rating,
+        completion_certificate_url=app.completion_certificate_url or "",
+        internship_report_url=app.internship_report_url or "",
+        weekly_progress_logs=app.weekly_progress_logs or [],
         created_at=app.created_at,
         updated_at=app.updated_at
     )
 
-@applications_router.post("/listings/{listing_id}/apply", response={201: JobApplicationOut, 400: dict, 404: dict, 409: dict}, auth=StudentAuth())
+@applications_router.post("/listings/{listing_id}/apply", response={201: JobApplicationOut, 200: JobApplicationOut, 400: dict, 404: dict, 409: dict}, auth=StudentAuth())
 def apply_to_listing(request, listing_id: int, payload: Optional[JobApplicationApplyIn] = None):
     """
-    Student submits application to a job or internship listing.
+    Student submits application to a job or internship listing (Idempotent).
     Calculates instant match score between candidate's skills and listing requirements.
     ACID row-locking and OperationalError handling.
+    Safely returns 200 OK on network retry if application already exists.
     """
     from django.utils import timezone
     try:
@@ -553,7 +573,8 @@ def apply_to_listing(request, listing_id: int, payload: Optional[JobApplicationA
 
             existing = JobApplication.objects.filter(listing=listing, student=student_profile).first()
             if existing:
-                return 400, {"message": "You have already applied to this listing."}
+                # Idempotent return: application already exists
+                return 200, _application_to_schema(existing)
 
             # Deterministic skill fitment snapshot
             student_skills = list((student_profile.skills_matrix or {}).keys())
@@ -640,6 +661,10 @@ def update_application_status(request, application_id: int, payload: JobApplicat
             if application.listing.company_id != recruiter.company_id and request.auth.role != User.Role.ADMIN:
                 return 403, {"message": "You can only manage applications for your company."}
 
+            # Idempotency check: if application is already in target_status and no new note is provided, return existing state
+            if application.status == target_status and (not payload.note or payload.note == application.recruiter_notes):
+                return 200, _application_to_schema(application)
+
             # Row-lock the student profile
             student = StudentProfile.objects.select_for_update().get(id=application.student_id)
 
@@ -714,14 +739,235 @@ def get_my_applications(request):
             recruiter_notes=a.recruiter_notes or "",
             interview_date=getattr(a, 'interview_date', None),
             status_history=a.status_history or [],
+            internship_status=a.internship_status,
+            mentor_name=a.mentor_name or "",
+            mentor_designation=a.mentor_designation or "",
+            mentor_feedback=a.mentor_feedback or "",
+            mentor_rating=a.mentor_rating,
+            completion_certificate_url=a.completion_certificate_url or "",
+            internship_report_url=a.internship_report_url or "",
+            weekly_progress_logs=a.weekly_progress_logs or [],
             created_at=a.created_at
         ))
     return out
 
 
+@applications_router.patch("/{application_id}/internship-progress", response={200: JobApplicationOut, 400: dict, 403: dict, 404: dict}, auth=RecruiterAuth())
+def update_internship_progress(request, application_id: int, payload: InternshipProgressUpdateIn):
+    """
+    Recruiter & Mentor Internship Progress Supervision (PS Requirement):
+    Updates live internship lifecycle status, logs mentor qualitative review remarks,
+    sets 1-5 performance rating, and attaches verified completion certificate URL or report.
+    When marked COMPLETED, automatically records verified internship into candidate's digital portfolio.
+    """
+    recruiter = RecruiterProfile.objects.filter(user=request.auth).first()
+    application = JobApplication.objects.select_related('listing__company', 'student__user').filter(id=application_id).first()
+    if not application:
+        return 404, {"message": "Application not found."}
+    if application.listing.company_id != recruiter.company_id and request.auth.role != User.Role.ADMIN:
+        return 403, {"message": "You can only manage internships for your company."}
+
+    valid_statuses = [choice[0] for choice in JobApplication.InternshipStatus.choices]
+    if payload.internship_status not in valid_statuses:
+        return 400, {"message": f"Invalid internship status '{payload.internship_status}'. Must be one of {valid_statuses}."}
+
+    application.internship_status = payload.internship_status
+    if payload.mentor_name is not None:
+        application.mentor_name = payload.mentor_name
+    if payload.mentor_designation is not None:
+        application.mentor_designation = payload.mentor_designation
+    if payload.mentor_feedback is not None:
+        application.mentor_feedback = payload.mentor_feedback
+    if payload.mentor_rating is not None:
+        application.mentor_rating = max(1.0, min(5.0, float(payload.mentor_rating)))
+    if payload.completion_certificate_url is not None:
+        application.completion_certificate_url = payload.completion_certificate_url
+    if payload.internship_report_url is not None:
+        application.internship_report_url = payload.internship_report_url
+    application.save()
+
+    # Automatic Digital Portfolio Hook upon Completion
+    if payload.internship_status == JobApplication.InternshipStatus.COMPLETED:
+        student = application.student
+        internships = list(student.internships or [])
+        already_added = any(
+            i.get('company') == application.listing.company.name and i.get('role') == application.listing.title
+            for i in internships
+        )
+        if not already_added:
+            internships.append({
+                "company": application.listing.company.name,
+                "role": application.listing.title,
+                "duration": application.listing.tenure or "Internship",
+                "mentor_name": application.mentor_name or "",
+                "mentor_designation": application.mentor_designation or "",
+                "mentor_feedback": application.mentor_feedback or "",
+                "mentor_rating": application.mentor_rating or 5.0,
+                "certificate_url": application.completion_certificate_url or "",
+                "report_url": application.internship_report_url or "",
+                "completed_at": datetime.now().isoformat()
+            })
+            student.internships = internships
+            student.save(update_fields=['internships'])
+
+        # Real-time alert to candidate
+        Notification.objects.create(
+            user=student.user,
+            title=f"Internship Completed: {application.listing.title}",
+            message=f"Congratulations! Your internship at '{application.listing.company.name}' has been marked Completed with a rating of {application.mentor_rating or 5.0}/5.0. Verified credential added to your Digital Portfolio.",
+            notification_type=Notification.NotificationType.STATUS_CHANGE,
+            related_application_id=application.id,
+            related_listing_id=application.listing.id
+        )
+
+    return 200, _application_to_schema(application)
+
+
 # ---------------------------------------------------------
-# ROUTER 4: IDEMPOTENT INSTITUTIONAL PLACEMENT REPORTING
-# (Now cleanly maintained in institutions.api; re-exported for backwards compatibility)
+# ROUTER 4: INDUSTRY LEARNING PROGRAMS & COLLABORATION INITIATIVES
+# ---------------------------------------------------------
+programs_router = Router(tags=["Industry Learning Programs & Collaboration"])
+
+def _program_to_schema(program: LearningProgram) -> LearningProgramOut:
+    s_count = getattr(program, 'enrolled_students_count', None)
+    if s_count is None:
+        s_count = program.enrolled_students.count()
+    f_count = getattr(program, 'enrolled_faculty_count', None)
+    if f_count is None:
+        f_count = program.enrolled_faculty.count()
+    return LearningProgramOut(
+        id=program.id,
+        company_id=program.company.id,
+        company_name=program.company.name,
+        company_logo=program.company.branding_logo_url or "",
+        title=program.title,
+        program_type=program.program_type,
+        target_audience=program.target_audience,
+        description=program.description,
+        skills_covered=program.skills_covered or [],
+        instructor_or_mentor=program.instructor_or_mentor or "",
+        duration=program.duration,
+        mode=program.mode,
+        registration_deadline=program.registration_deadline,
+        start_date=program.start_date,
+        is_certified=program.is_certified,
+        branding_banner_url=program.branding_banner_url or "",
+        enrolled_students_count=s_count,
+        enrolled_faculty_count=f_count,
+        created_at=program.created_at
+    )
+
+@programs_router.get("/", response=List[LearningProgramOut])
+def list_learning_programs(
+    request,
+    program_type: Optional[str] = None,
+    target_audience: Optional[str] = None,
+    mode: Optional[str] = None,
+    q: Optional[str] = None
+):
+    """
+    Industry Learning Programs Feed (PS Requirement):
+    Browse corporate training programs, certification tracks, hands-on workshops,
+    mentorship initiatives, and innovation challenges/hackathons.
+    """
+    qs = LearningProgram.objects.select_related('company').annotate(
+        enrolled_students_count=models.Count('enrolled_students', distinct=True),
+        enrolled_faculty_count=models.Count('enrolled_faculty', distinct=True)
+    )
+    if program_type:
+        qs = qs.filter(program_type__iexact=program_type)
+    if target_audience and target_audience != 'ALL':
+        qs = qs.filter(models.Q(target_audience__iexact=target_audience) | models.Q(target_audience='ALL'))
+    if mode:
+        qs = qs.filter(mode__iexact=mode)
+    if q:
+        qs = qs.filter(
+            models.Q(title__icontains=q) |
+            models.Q(description__icontains=q) |
+            models.Q(company__name__icontains=q)
+        )
+    return [_program_to_schema(p) for p in qs]
+
+@programs_router.post("/", response={201: LearningProgramOut, 400: dict}, auth=RecruiterAuth())
+def create_learning_program(request, payload: LearningProgramCreateIn):
+    """
+    Publish an Industry Learning Program, Workshop, or Innovation Challenge:
+    Restricted to authenticated corporate recruiters.
+    """
+    recruiter = RecruiterProfile.objects.filter(user=request.auth).first()
+    if not recruiter or not recruiter.company:
+        return 400, {"message": "You must register or join a company before publishing learning programs."}
+
+    program = LearningProgram.objects.create(
+        company=recruiter.company,
+        title=payload.title,
+        program_type=payload.program_type,
+        target_audience=payload.target_audience,
+        description=payload.description,
+        skills_covered=payload.skills_covered or [],
+        instructor_or_mentor=payload.instructor_or_mentor or "",
+        duration=payload.duration or "4 Weeks",
+        mode=payload.mode or "ONLINE",
+        registration_deadline=payload.registration_deadline,
+        start_date=payload.start_date,
+        is_certified=payload.is_certified,
+        branding_banner_url=payload.branding_banner_url or ""
+    )
+    return 201, _program_to_schema(program)
+
+@programs_router.get("/{program_id}", response={200: LearningProgramOut, 404: dict})
+def get_learning_program_detail(request, program_id: int):
+    """Fetch detailed information for a specific learning program or workshop."""
+    program = LearningProgram.objects.select_related('company').annotate(
+        enrolled_students_count=models.Count('enrolled_students', distinct=True),
+        enrolled_faculty_count=models.Count('enrolled_faculty', distinct=True)
+    ).filter(id=program_id).first()
+    if not program:
+        return 404, {"message": "Learning program not found."}
+    return 200, _program_to_schema(program)
+
+@programs_router.post("/{program_id}/enroll", response={200: dict, 400: dict, 404: dict}, auth=JWTAuth())
+def enroll_in_learning_program(request, program_id: int):
+    """
+    1-Click Enrollment in Industry Learning Program or Workshop:
+    Accessible to both Students/Candidates and Faculty/Academicians.
+    """
+    user = request.auth
+    program = LearningProgram.objects.select_related('company').filter(id=program_id).first()
+    if not program:
+        return 404, {"message": "Learning program not found."}
+
+    from institutions.models import FacultyProfile
+    if user.role in [User.Role.STUDENT, User.Role.CANDIDATE]:
+        student_profile, _ = StudentProfile.objects.get_or_create(user=user)
+        program.enrolled_students.add(student_profile)
+        role_label = "Student"
+    elif user.role in [User.Role.ACADEMIA, User.Role.FACULTY]:
+        faculty_profile, _ = FacultyProfile.objects.get_or_create(user=user)
+        program.enrolled_faculty.add(faculty_profile)
+        role_label = "Faculty"
+    else:
+        return 400, {"message": "Only students and faculty can enroll in learning programs."}
+
+    Notification.objects.create(
+        user=user,
+        title=f"Enrolled in {program.title}",
+        message=f"You have successfully enrolled in '{program.title}' offered by {program.company.name}. Program mode: {program.mode}.",
+        notification_type=Notification.NotificationType.NEW_OPPORTUNITY
+    )
+
+    return 200, {
+        "success": True,
+        "message": f"Successfully enrolled {user.username} in {program.title}.",
+        "program_id": program.id,
+        "enrolled_as": role_label
+    }
+
+
+# ---------------------------------------------------------
+# ROUTER 5: IDEMPOTENT INSTITUTIONAL PLACEMENT REPORTING
+# (Maintained in institutions.api; re-exported for backwards compatibility)
 # ---------------------------------------------------------
 from institutions.api import placement_router
+
 

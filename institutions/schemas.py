@@ -154,3 +154,11 @@ class PlacementTrendsOut(Schema):
     conversion_rates: Dict[str, float]
     role_type_distribution: Dict[str, int]
     active_companies_count: int
+
+# --- FACULTY INDUSTRY COLLABORATION SCHEMAS (PS REQUIREMENT) ---
+
+class FacultyOpportunityApplyIn(Schema):
+    statement_of_purpose: Optional[str] = ""
+    research_areas: Optional[List[str]] = []
+    preferred_start_date: Optional[datetime] = None
+

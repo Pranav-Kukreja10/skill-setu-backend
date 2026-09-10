@@ -40,6 +40,7 @@ class ResilientGrader:
         mcq_count = 0
         viva_score_sum = 0
         viva_count = 0
+        viva_fault_detected = False
         
         detailed_feedback = []
 
@@ -91,18 +92,45 @@ class ResilientGrader:
                     student_answer=student_answer_text,
                     rubric=q["explanation"]
                 )
-                viva_score_sum += viva_score
+                
+                if viva_score is None:
+                    viva_fault_detected = True
+                    score = 0
+                else:
+                    score = viva_score
+                    viva_score_sum += score
                 
                 detailed_feedback.append({
                     "id": q_id,
                     "question_text": q["question_text"],
                     "type": "VIVA",
                     "student_answer": student_answer_text,
-                    "score": viva_score,
+                    "score": score,
                     "feedback": evaluation_feedback
                 })
 
         final_mcq_avg = total_mcq_score / mcq_count if mcq_count > 0 else 0
+
+        # Strict Verification Guarantee: If external AI failed during viva grading,
+        # NEVER award free or unearned scores. Acknowledge the fault on our side and mandate a retest.
+        if viva_fault_detected:
+            return {
+                "success": False,
+                "retest_required": True,
+                "fault_acknowledged": True,
+                "message": (
+                    "Oops! Our automated viva evaluation engine encountered an unexpected interruption on our end while evaluating your response. "
+                    "Because we uphold rigorous academic and industry verification standards, we never award arbitrary or unearned scores. "
+                    "We have acknowledged this fault on our side, kept your session open, and prepared an immediate retest so you can obtain a genuine verified score. "
+                    "Please submit again or retry when ready!"
+                ),
+                "cognitive_score": 0,
+                "mcq_average": int(final_mcq_avg),
+                "viva_average": 0,
+                "confidence_score": 0,
+                "feedback_log": detailed_feedback
+            }
+
         final_viva_avg = viva_score_sum / viva_count if viva_count > 0 else 0
         
         # Weighted Cognitive Score: 30% MCQ (with Time-Decay), 70% Viva (Reasoning-focused)
@@ -115,6 +143,10 @@ class ResilientGrader:
         confidence_score = int(cognitive_score * (1 - penalty))
 
         return {
+            "success": True,
+            "retest_required": False,
+            "fault_acknowledged": False,
+            "message": "Assessment evaluated successfully.",
             "cognitive_score": int(cognitive_score),
             "mcq_average": int(final_mcq_avg),
             "viva_average": int(final_viva_avg),
@@ -135,7 +167,10 @@ class ResilientGrader:
         model = os.getenv("MODEL_GRADER", "gemini-3.1-flash-lite")
         
         if not api_key:
-            raise ValueError("GEMINI_API_KEY is missing in your .env configuration.")
+            return None, (
+                "Oops! Our automated grading engine is currently unable to authenticate with the cloud provider on our end. "
+                "In upholding strict verification standards, we do not award arbitrary unearned scores. Retest required."
+            )
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
@@ -192,4 +227,9 @@ class ResilientGrader:
             
             return int(content["score"]), content["feedback"]
         except Exception as e:
-            return 50, f"Automatic grading service temporarily timed out. Fallback default applied: {str(e)}"
+            # Do NOT give free scores! Acknowledge system fault and signal that retest is required.
+            return None, (
+                f"Oops! Our automated grading engine experienced a technical hiccup on our end while reviewing your response ({str(e)}). "
+                "Because we maintain strict verification standards and never award arbitrary scores, this response requires a retest. "
+                "We sincerely apologize for this inconvenience on our side!"
+            )
