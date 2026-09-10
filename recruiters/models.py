@@ -44,11 +44,49 @@ class RecruiterProfile(models.Model):
     department = models.CharField(max_length=150, blank=True, help_text="e.g. Talent Acquisition, Infrastructure Team")
     contact_phone = models.CharField(max_length=30, blank=True)
     is_company_admin = models.BooleanField(default=False, help_text="Authorizes editing company verification, website, branding")
+    preferences = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Recruiter workflow, blind screening, and alert preferences"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'skillsetu_recruiter_profiles'
+
+    def get_preferences(self) -> dict:
+        defaults = {
+            "common": {
+                "theme": "system",
+                "language": "en",
+                "timezone": "Asia/Kolkata",
+                "email_alerts": True,
+                "in_app_alerts": True,
+                "high_contrast": False,
+                "reduce_motion": False,
+            },
+            "candidate_screening": {
+                "default_blind_screening": False,
+                "minimum_engineering_score_filter": 60.0,
+                "require_verified_assessment": False,
+                "preferred_nheqf_level": "LEVEL_5_5",
+            },
+            "hiring_workflow": {
+                "auto_advance_high_match": False,
+                "application_review_assignment": "MANUAL",
+                "new_applicant_alert_frequency": "INSTANT",
+            },
+            "branding": {
+                "show_diversity_employer_badge": True,
+                "public_company_profile_visible": True,
+            }
+        }
+        current = self.preferences or {}
+        merged = {}
+        for section, sec_defaults in defaults.items():
+            merged[section] = {**sec_defaults, **current.get(section, {})}
+        return merged
 
     def __str__(self):
         comp = self.company.name if self.company else "Independent"
@@ -102,6 +140,12 @@ class JobListing(models.Model):
     application_deadline = models.DateTimeField(null=True, blank=True, help_text="Last date to submit applications")
     tenure = models.CharField(max_length=100, blank=True, help_text="e.g. 6 Months, Permanent, 2 Weeks")
     open_positions = models.IntegerField(default=1)
+    min_nheqf_level = models.CharField(
+        max_length=25,
+        default='LEVEL_4_5',
+        blank=True,
+        help_text="NEP 2020 Minimum qualification level: LEVEL_4_5 (Cert), LEVEL_5_0 (Dip), LEVEL_5_5 (3-Yr Deg), LEVEL_6_0 (4-Yr Deg)"
+    )
     
     # Skills and requirements
     required_skills = models.JSONField(default=list, help_text="Standardized or raw skill requirements e.g. ['python', 'django', 'postgresql']")

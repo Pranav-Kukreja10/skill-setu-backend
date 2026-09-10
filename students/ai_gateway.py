@@ -179,10 +179,11 @@ class AIGateway:
             return AIGateway._get_fallback_resume_analysis(raw_text, error_message=str(err))
 
     @staticmethod
-    def generate_adaptive_test(role_title: str, skills: list, projects: list) -> dict:
+    def generate_adaptive_test(role_title: str, skills: list, projects: list, github_repos: list = None) -> dict:
         """
         Task 2: Progressive Test Generation. Routed strictly to gemini-3.5-flash-lite.
         Universally assesses candidates across any professional domain.
+        Anti-Vibe-Coding: Grounds system design vivas directly into candidate's real GitHub repositories.
         Graceful Degradation: Returns curated, standardized assessment if external AI is down/timed out.
         """
         try:
@@ -228,6 +229,19 @@ class AIGateway:
                     f"3. Question 3 (MCQ - MEDIUM): Directly target a strategic, technical, or procedural decision from their listed projects or case studies.\n"
                     f"4. Question 4 (VIVA - MEDIUM): Open-ended question asking the candidate to explain their methodology, architectural patterns, or workflow strategy.\n"
                     f"5. Question 5 (VIVA - HARD): High-stakes scenario, edge case, audit challenge, trade-off analysis, or crisis response matching their field.\n\n"
+                )
+
+                if github_repos:
+                    repos_summary = [f"{r.get('name')} ({', '.join(r.get('languages', []))}) - {r.get('description', '')}" for r in github_repos[:3]]
+                    prompt += (
+                        f"Anti-Vibe-Coding Verification Mandate:\n"
+                        f"Candidate has verified GitHub codebases: {repos_summary}\n"
+                        f"For Question 4 or Question 5 (VIVA), directly anchor the question to one of their specific repositories above. "
+                        f"Ask the candidate to explain their system design, data flow, error handling strategy, or architectural trade-offs "
+                        f"in that project to verify deep engineering comprehension and detect superficial AI-prompt vibe coding.\n\n"
+                    )
+
+                prompt += (
                     f"For VIVA questions, set 'options' to null and 'correct_answer' to null, and write a detailed "
                     f"grading rubric explanation of what a high-quality answer must mention."
                 )
@@ -245,10 +259,10 @@ class AIGateway:
                     "test_session_token": session_token
                 }
             else:
-                return AIGateway._get_fallback_adaptive_test(role_title, skills, projects)
+                return AIGateway._get_fallback_adaptive_test(role_title, skills, projects, github_repos=github_repos)
         except Exception as err:
             logger.warning(f"AI Gateway test generation error: {err}. Triggering graceful Apple-grade fallback.")
-            return AIGateway._get_fallback_adaptive_test(role_title, skills, projects, error_message=str(err))
+            return AIGateway._get_fallback_adaptive_test(role_title, skills, projects, github_repos=github_repos, error_message=str(err))
 
     @staticmethod
     def _get_fallback_resume_analysis(raw_text: str, error_message: str = "") -> dict:
@@ -337,13 +351,32 @@ class AIGateway:
         }
 
     @staticmethod
-    def _get_fallback_adaptive_test(role_title: str, skills: list, projects: list, error_message: str = "") -> dict:
+    def _get_fallback_adaptive_test(role_title: str, skills: list, projects: list, github_repos: list = None, error_message: str = "") -> dict:
         """
         Graceful Curated Fallback for Test Generation:
         When external AI is unreachable or rate-limited, provides a rich, progressive
         5-question evaluation tailored to the role, complete with rubrics and answers.
+        Anti-Vibe-Coding: Grounds Question 4 in candidate's actual GitHub repo if present.
         """
         import base64
+
+        q4_text = f"Explain the high-level methodology and architectural decisions you would take to implement a robust solution for a core {role_title} project."
+        q4_expl = "Candidate should explain modular structure, requirement analysis, testing strategy, and practical trade-offs."
+
+        if github_repos and isinstance(github_repos, list) and len(github_repos) > 0:
+            top_repo = github_repos[0]
+            repo_name = top_repo.get("name", "your core project")
+            repo_langs = ", ".join(top_repo.get("languages", [])) or "your chosen stack"
+            q4_text = (
+                f"[Anti-Vibe-Coding Architectural Viva] In your GitHub repository '{repo_name}' ({repo_langs}), "
+                f"explain how you architected the data flow, handled state persistence, and implemented error recovery "
+                f"if a primary dependency or network service experiences downtime."
+            )
+            q4_expl = (
+                f"Anti-Vibe-Coding Verification: Candidate must explain modular system design, exception handling, "
+                f"idempotency, and real architecture in their actual repository '{repo_name}' rather than AI-prompted vibe coding."
+            )
+
         questions = [
             {
                 "id": 1,
@@ -389,12 +422,12 @@ class AIGateway:
             },
             {
                 "id": 4,
-                "question_text": f"Explain the high-level methodology and architectural decisions you would take to implement a robust solution for a core {role_title} project.",
+                "question_text": q4_text,
                 "type": "VIVA",
                 "difficulty": "MEDIUM",
                 "options": None,
                 "correct_answer": None,
-                "explanation": "Candidate should explain modular structure, requirement analysis, testing strategy, and practical trade-offs."
+                "explanation": q4_expl
             },
             {
                 "id": 5,

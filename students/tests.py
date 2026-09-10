@@ -4,6 +4,7 @@ from students.services import (
     build_skills_matrix,
     compute_profile_strength,
 )
+from students.models import StudentProfile
 from students.grader import ResilientGrader
 
 class ScoringAndMathFormulasTest(SimpleTestCase):
@@ -246,6 +247,154 @@ class ScoringAndMathFormulasTest(SimpleTestCase):
         self.assertTrue(item.is_diversity_drive)
         self.assertEqual(item.target_gender, "FEMALE_ONLY")
         self.assertEqual(len(item.dei_initiatives), 2)
+
+    def test_nep_2020_passport_and_ncrf_calculation(self):
+        profile = StudentProfile(
+            apaar_id="9823-4412-8901",
+            abc_id="ABC-782-901-44",
+            degree="B.Com",
+            minor_specialization="Data Analytics",
+            nheqf_level=StudentProfile.NHEQFLevel.LEVEL_6_0
+        )
+        profile.internships = [
+            {"company": "Microsoft", "duration": "8 weeks", "hours_worked": 160},
+            {"company": "Amazon", "duration": "4 weeks", "hours_worked": 80}
+        ]
+        profile.certifications = [
+            {"name": "AWS Certified Developer"},
+            {"name": "Tally Prime Certified"}
+        ]
+
+        # Test NCrF Credit Engine
+        ncrf = profile.calculate_ncrf_credits()
+        self.assertEqual(ncrf["total_internship_hours"], 240)
+        self.assertEqual(ncrf["certification_credits"], 2)
+        # 160 hrs // 30 = 5 credits, 80 hrs // 30 = 2 credits -> 7 internship credits
+        self.assertEqual(ncrf["internship_credits"], 7)
+        self.assertEqual(ncrf["total_ncrf_credits"], 9)
+
+        # Test AICTE Activity Points
+        aicte = profile.calculate_aicte_activity_points()
+        # 240 hours // 40 * 10 = 60 points
+        self.assertEqual(aicte["points_earned"], 60)
+        self.assertEqual(aicte["target_points"], 100)
+        self.assertEqual(aicte["completion_percentage"], 60.0)
+        self.assertFalse(aicte["is_target_met"])  # 60 < 75
+
+        # Test APAAR ID Validation
+        passport = profile.get_nep_passport()
+        self.assertTrue(passport["is_apaar_verified"])
+        self.assertEqual(passport["apaar_id"], "9823-4412-8901")
+        self.assertEqual(passport["minor_specialization"], "Data Analytics")
+
+    def test_nep_transcript_schema(self):
+        from students.schemas import NEPTranscriptOutSchema
+        transcript = NEPTranscriptOutSchema(
+            transcript_id="NEP-101-20260910",
+            apaar_id="9823-4412-8901",
+            abc_id="ABC-782-901-44",
+            student_name="Ananya Sharma",
+            institution="Delhi University",
+            degree_major="B.Com Honours",
+            minor_specialization="Data Analytics",
+            nheqf_level="LEVEL_6_0",
+            ncrf_credits_earned=8,
+            aicte_activity_points=60,
+            parakh_holistic_grade="Exemplary (A+)",
+            parakh_holistic_score=88.5,
+            verified_internship_records=[{"company": "Google", "duration": "8 weeks"}],
+            verified_certifications=[{"name": "Python for Finance"}],
+            digilocker_verification_status="AUTHENTIC_VERIFIED",
+            digilocker_sha256_hash="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            issued_at="2026-09-10T12:00:00"
+        )
+        self.assertEqual(transcript.ncrf_credits_earned, 8)
+        self.assertEqual(transcript.aicte_activity_points, 60)
+        self.assertEqual(transcript.digilocker_verification_status, "AUTHENTIC_VERIFIED")
+
+    def test_github_screening_engine(self):
+        from students.github_screening import (
+            extract_github_handle,
+            analyze_commits,
+            compute_engineering_scores,
+            get_mock_github_screening
+        )
+
+        # Test URL and handle extraction
+        self.assertEqual(extract_github_handle("https://github.com/pranav-dev"), "pranav-dev")
+        self.assertEqual(extract_github_handle("https://github.com/torvalds/linux"), "torvalds")
+        self.assertEqual(extract_github_handle("@alex_codes/"), "alex_codes")
+        self.assertIsNone(extract_github_handle(""))
+
+        # Test Conventional Commits analysis
+        mock_commits = [
+            {"commit": {"message": "feat(auth): implement refresh token rotation\n\nCloses #10"}},
+            {"commit": {"message": "fix(db): resolve pgvector index deadlocks"}},
+            {"commit": {"message": "test: add unit test for adaptive test generator"}},
+            {"commit": {"message": "update code"}}
+        ]
+        stats = analyze_commits(mock_commits)
+        self.assertEqual(stats["total_analyzed"], 4)
+        self.assertEqual(stats["conventional_count"], 3)
+        self.assertEqual(stats["conventional_pct"], 75.0)
+        self.assertTrue(stats["avg_message_length"] > 20)
+
+        # Test Engineering Scores & Anti-Vibe Index
+        mock_repos = [
+            {
+                "name": "microservices-platform",
+                "has_ci_cd": True,
+                "has_docker": True,
+                "has_tests": True,
+                "has_linter": True,
+                "has_readme": True
+            }
+        ]
+        scores = compute_engineering_scores(mock_repos, stats)
+        # CI/CD (25) + Tests (25) + Docker (20) + Conv Commits (75% of 15 = 11.25) + Linter (10) + Readme (5) = 96.2
+        self.assertTrue(scores["engineering_score"] >= 90.0)
+        self.assertTrue(scores["anti_vibe_index"] >= 80.0)
+        self.assertEqual(scores["badge"], "Production-Ready Engineer")
+
+        # Test Presentation Fallback Mock
+        fallback = get_mock_github_screening("demo_alex")
+        self.assertTrue(fallback["is_screened"])
+        self.assertTrue(fallback["is_presentation_fallback"])
+        self.assertTrue(fallback["engineering_score"] >= 75.0)
+        self.assertTrue("python" in fallback["synergy_skills_verified"])
+
+    def test_github_radar_and_skill_boost(self):
+        from students.services import build_skills_matrix, compute_profile_strength
+        from students.models import StudentProfile
+
+        skills_list = [
+            {"name": "Python", "project_evidence_score": 60, "experience_recency_score": 70},
+            {"name": "Accounting", "project_evidence_score": 50, "experience_recency_score": 50}
+        ]
+        # With GitHub verification for Python
+        matrix = build_skills_matrix(skills_list, github_verified_skills=["python", "docker"])
+        self.assertTrue(matrix["python"]["is_github_verified"])
+        # Python Pe boosted from 60 -> 75, so Ws = (0.6*75) + (0.4*70) = 45 + 28 = 73
+        self.assertEqual(matrix["python"]["project_evidence"], 75)
+        self.assertEqual(matrix["python"]["weight"], 73)
+        # Accounting not in GitHub -> remains unboosted (Pe=50, Ws=50)
+        self.assertFalse(matrix["accounting"]["is_github_verified"])
+        self.assertEqual(matrix["accounting"]["project_evidence"], 50)
+
+        # Test Profile Strength blending with GitHub engineering score
+        mock_p = StudentProfile()
+        mock_p.overall_confidence_score = 80.0
+        mock_p.skills_matrix = matrix
+        mock_p.certifications = []
+        mock_p.cgpa = 8.0
+        mock_p.github_metrics = {"engineering_score": 90.0}
+
+        score_with_gh, bd_with_gh = compute_profile_strength(mock_p)
+        self.assertEqual(bd_with_gh["github_engineering_score"], 90.0)
+        # mean_skills_weight = (73 + 50) / 2 = 61.5
+        # s_projects_exp = (0.70 * 61.5) + (0.30 * 90.0) = 43.05 + 27.0 = 70.05
+        self.assertAlmostEqual(bd_with_gh["projects_experience_score"], 70.05, places=2)
+
 
 
 

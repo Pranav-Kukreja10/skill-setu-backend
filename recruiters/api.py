@@ -12,6 +12,7 @@ from recruiters.models import Company, RecruiterProfile, JobListing, JobApplicat
 from recruiters.schemas import (
     CompanyCreateIn, CompanyUpdateIn, CompanyOut,
     RecruiterProfileUpdateIn, RecruiterProfileOut,
+    RecruiterSettingsOutSchema, RecruiterSettingsUpdateIn,
     JobListingCreateIn, JobListingUpdateIn, JobListingOut,
     CandidateJobSearchIn, CandidateJobSearchResponseOut, CandidateJobSearchResultOut,
     JobApplicationApplyIn, JobApplicationStatusUpdateIn, JobApplicationOut, StudentMyApplicationOut,
@@ -62,7 +63,8 @@ def get_my_recruiter_profile(request):
         department=recruiter.department,
         contact_phone=recruiter.contact_phone,
         is_company_admin=recruiter.is_company_admin,
-        company=comp_out
+        company=comp_out,
+        preferences=recruiter.get_preferences()
     )
 
 @recruiters_router.put("/me", response={200: RecruiterProfileOut, 400: dict})
@@ -81,6 +83,44 @@ def update_my_recruiter_profile(request, payload: RecruiterProfileUpdateIn):
     recruiter.save()
 
     return get_my_recruiter_profile(request)
+
+@recruiters_router.get("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict})
+def get_my_recruiter_settings(request):
+    """
+    Retrieve authenticated recruiter's workflow, blind screening, and alert preferences.
+    """
+    recruiter, _ = RecruiterProfile.objects.get_or_create(
+        user=request.auth,
+        defaults={"designation": "Talent Acquisition Specialist", "is_company_admin": True}
+    )
+    return 200, recruiter.get_preferences()
+
+@recruiters_router.put("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict})
+@recruiters_router.patch("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict})
+def update_my_recruiter_settings(request, payload: RecruiterSettingsUpdateIn):
+    """
+    Update recruiter's granular preferences:
+    - common: theme, language, timezone, email/in-app alerts, accessibility
+    - candidate_screening: default blind screening, minimum engineering score filter, NHEQF level
+    - hiring_workflow: auto-advance high match candidates, review assignment, alert frequency
+    - branding: diversity employer badge, public company profile visibility
+    """
+    recruiter, _ = RecruiterProfile.objects.get_or_create(
+        user=request.auth,
+        defaults={"designation": "Talent Acquisition Specialist", "is_company_admin": True}
+    )
+    current = recruiter.get_preferences()
+    if payload.common is not None:
+        current["common"].update(payload.common)
+    if payload.candidate_screening is not None:
+        current["candidate_screening"].update(payload.candidate_screening)
+    if payload.hiring_workflow is not None:
+        current["hiring_workflow"].update(payload.hiring_workflow)
+    if payload.branding is not None:
+        current["branding"].update(payload.branding)
+    recruiter.preferences = current
+    recruiter.save(update_fields=['preferences'])
+    return 200, current
 
 @recruiters_router.post("/company", response={200: CompanyOut, 400: dict})
 def create_or_link_company(request, payload: CompanyCreateIn):
@@ -216,8 +256,11 @@ def _listing_to_schema(listing: JobListing) -> JobListingOut:
         tenure=listing.tenure or "",
         open_positions=listing.open_positions,
         required_skills=listing.required_skills or [],
-        eligibility_criteria=listing.eligibility_criteria or {},
         description=listing.description,
+        is_diversity_drive=getattr(listing, 'is_diversity_drive', False),
+        target_gender=getattr(listing, 'target_gender', "ALL") or "ALL",
+        dei_initiatives=getattr(listing, 'dei_initiatives', []) or [],
+        min_nheqf_level=getattr(listing, 'min_nheqf_level', 'LEVEL_4_5') or 'LEVEL_4_5',
         applications_count=apps_count or 0,
         created_at=listing.created_at,
         updated_at=listing.updated_at
@@ -297,7 +340,11 @@ def create_job_listing(request, payload: JobListingCreateIn):
         open_positions=payload.open_positions or 1,
         required_skills=payload.required_skills or [],
         eligibility_criteria=payload.eligibility_criteria or {},
-        description=payload.description
+        description=payload.description,
+        is_diversity_drive=payload.is_diversity_drive or False,
+        target_gender=payload.target_gender or "ALL",
+        dei_initiatives=payload.dei_initiatives or [],
+        min_nheqf_level=payload.min_nheqf_level or 'LEVEL_4_5'
     )
 
     # Index embedding and search corpus
@@ -421,6 +468,14 @@ def update_job_listing(request, listing_id: int, payload: JobListingUpdateIn):
         listing.eligibility_criteria = payload.eligibility_criteria
     if payload.description is not None:
         listing.description = payload.description
+    if payload.min_nheqf_level is not None:
+        listing.min_nheqf_level = payload.min_nheqf_level
+    if payload.is_diversity_drive is not None:
+        listing.is_diversity_drive = payload.is_diversity_drive
+    if payload.target_gender is not None:
+        listing.target_gender = payload.target_gender
+    if payload.dei_initiatives is not None:
+        listing.dei_initiatives = payload.dei_initiatives
 
     listing.save()
     index_job_listing(listing)

@@ -34,7 +34,43 @@ class CompanyOut(Schema):
     headquarters: Optional[str] = ""
     created_at: datetime
 
-# --- RECRUITER PROFILE SCHEMAS ---
+# --- RECRUITER PROFILE & SETTINGS SCHEMAS ---
+
+class RecruiterCommonSettingsSchema(Schema):
+    theme: str = "system"
+    language: str = "en"
+    timezone: str = "Asia/Kolkata"
+    email_alerts: bool = True
+    in_app_alerts: bool = True
+    high_contrast: bool = False
+    reduce_motion: bool = False
+
+class CandidateScreeningPreferencesSchema(Schema):
+    default_blind_screening: bool = False
+    minimum_engineering_score_filter: float = 60.0
+    require_verified_assessment: bool = False
+    preferred_nheqf_level: str = "LEVEL_5_5"
+
+class HiringWorkflowPreferencesSchema(Schema):
+    auto_advance_high_match: bool = False
+    application_review_assignment: str = "MANUAL"  # MANUAL, ROUND_ROBIN
+    new_applicant_alert_frequency: str = "INSTANT"  # INSTANT, DAILY_SUMMARY, NONE
+
+class RecruiterBrandingPreferencesSchema(Schema):
+    show_diversity_employer_badge: bool = True
+    public_company_profile_visible: bool = True
+
+class RecruiterSettingsOutSchema(Schema):
+    common: RecruiterCommonSettingsSchema = RecruiterCommonSettingsSchema()
+    candidate_screening: CandidateScreeningPreferencesSchema = CandidateScreeningPreferencesSchema()
+    hiring_workflow: HiringWorkflowPreferencesSchema = HiringWorkflowPreferencesSchema()
+    branding: RecruiterBrandingPreferencesSchema = RecruiterBrandingPreferencesSchema()
+
+class RecruiterSettingsUpdateIn(Schema):
+    common: Optional[Dict[str, Any]] = None
+    candidate_screening: Optional[Dict[str, Any]] = None
+    hiring_workflow: Optional[Dict[str, Any]] = None
+    branding: Optional[Dict[str, Any]] = None
 
 class RecruiterProfileUpdateIn(Schema):
     designation: Optional[str] = None
@@ -51,6 +87,7 @@ class RecruiterProfileOut(Schema):
     contact_phone: Optional[str] = ""
     is_company_admin: bool
     company: Optional[CompanyOut] = None
+    preferences: Optional[Dict[str, Any]] = None
 
 # --- JOB LISTING SCHEMAS ---
 
@@ -72,6 +109,7 @@ class JobListingCreateIn(Schema):
     is_diversity_drive: Optional[bool] = False
     target_gender: Optional[str] = "ALL"
     dei_initiatives: Optional[List[str]] = []
+    min_nheqf_level: Optional[str] = "LEVEL_4_5"
 
 class JobListingUpdateIn(Schema):
     title: Optional[str] = None
@@ -91,6 +129,7 @@ class JobListingUpdateIn(Schema):
     is_diversity_drive: Optional[bool] = None
     target_gender: Optional[str] = None
     dei_initiatives: Optional[List[str]] = None
+    min_nheqf_level: Optional[str] = None
 
 class JobListingOut(Schema):
     id: int
@@ -117,6 +156,7 @@ class JobListingOut(Schema):
     is_diversity_drive: bool = False
     target_gender: str = "ALL"
     dei_initiatives: List[str] = []
+    min_nheqf_level: str = "LEVEL_4_5"
     applications_count: int = 0
     created_at: datetime
     updated_at: datetime
@@ -130,6 +170,7 @@ class CandidateJobSearchIn(Schema):
     role_type: Optional[str] = None
     location: Optional[str] = None
     is_remote: Optional[bool] = None
+    min_nheqf_level: Optional[str] = None
 
 class CandidateJobSearchResultOut(Schema):
     id: int

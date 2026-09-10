@@ -40,7 +40,43 @@ class InstitutionCreateIn(Schema):
     nirf_rank: Optional[int] = None
     branding_logo_url: Optional[str] = None
 
-# --- FACULTY PROFILE SCHEMAS ---
+# --- FACULTY PROFILE & SETTINGS SCHEMAS ---
+
+class FacultyCommonSettingsSchema(Schema):
+    theme: str = "system"
+    language: str = "en"
+    timezone: str = "Asia/Kolkata"
+    email_alerts: bool = True
+    in_app_alerts: bool = True
+    high_contrast: bool = False
+    reduce_motion: bool = False
+
+class PlacementOversightPreferencesSchema(Schema):
+    auto_verify_internship_milestones: bool = False
+    alert_on_unplaced_final_years: bool = True
+    skill_deficit_threshold_pct: int = 40
+    enable_digilocker_auto_sync: bool = True
+
+class CurriculumAnalyticsPreferencesSchema(Schema):
+    benchmark_comparison_tier: str = "NATIONAL"  # NATIONAL, STATE, TIER_1
+    include_vocational_tracks: bool = True
+    share_department_radar_with_recruiters: bool = True
+
+class FacultyExposurePreferencesSchema(Schema):
+    fdp_and_industrial_training_alerts: bool = True
+    consultancy_invitation_sharing: bool = True
+
+class FacultySettingsOutSchema(Schema):
+    common: FacultyCommonSettingsSchema = FacultyCommonSettingsSchema()
+    placement_oversight: PlacementOversightPreferencesSchema = PlacementOversightPreferencesSchema()
+    curriculum_analytics: CurriculumAnalyticsPreferencesSchema = CurriculumAnalyticsPreferencesSchema()
+    faculty_exposure: FacultyExposurePreferencesSchema = FacultyExposurePreferencesSchema()
+
+class FacultySettingsUpdateIn(Schema):
+    common: Optional[Dict[str, Any]] = None
+    placement_oversight: Optional[Dict[str, Any]] = None
+    curriculum_analytics: Optional[Dict[str, Any]] = None
+    faculty_exposure: Optional[Dict[str, Any]] = None
 
 class FacultyProfileOut(Schema):
     id: int
@@ -55,6 +91,7 @@ class FacultyProfileOut(Schema):
     employee_id: Optional[str] = None
     contact_phone: str
     is_institution_admin: bool
+    preferences: Optional[Dict[str, Any]] = None
     created_at: datetime
 
 class FacultyProfileUpdateIn(Schema):

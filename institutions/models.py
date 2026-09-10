@@ -78,8 +78,46 @@ class FacultyProfile(models.Model):
     employee_id = models.CharField(max_length=50, blank=True, null=True)
     contact_phone = models.CharField(max_length=20, blank=True, default="")
     is_institution_admin = models.BooleanField(default=True)
+    preferences = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Institutional TPO placement alerts, curriculum radar, and DigiLocker preferences"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def get_preferences(self) -> dict:
+        defaults = {
+            "common": {
+                "theme": "system",
+                "language": "en",
+                "timezone": "Asia/Kolkata",
+                "email_alerts": True,
+                "in_app_alerts": True,
+                "high_contrast": False,
+                "reduce_motion": False,
+            },
+            "placement_oversight": {
+                "auto_verify_internship_milestones": False,
+                "alert_on_unplaced_final_years": True,
+                "skill_deficit_threshold_pct": 40,
+                "enable_digilocker_auto_sync": True,
+            },
+            "curriculum_analytics": {
+                "benchmark_comparison_tier": "NATIONAL",
+                "include_vocational_tracks": True,
+                "share_department_radar_with_recruiters": True,
+            },
+            "faculty_exposure": {
+                "fdp_and_industrial_training_alerts": True,
+                "consultancy_invitation_sharing": True,
+            }
+        }
+        current = self.preferences or {}
+        merged = {}
+        for section, sec_defaults in defaults.items():
+            merged[section] = {**sec_defaults, **current.get(section, {})}
+        return merged
 
     def __str__(self):
         inst_name = self.institution.name if self.institution else "Unassigned"

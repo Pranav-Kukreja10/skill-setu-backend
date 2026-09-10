@@ -113,11 +113,11 @@ def generate_role_fit_matrix(skills_matrix: dict) -> dict:
 
 # --- SKILL CREDENTIAL BOOST & CANDIDATE PROFILE STRENGTH ---
 
-def build_skills_matrix(extracted_skills_list: list, certifications: list = None) -> dict:
+def build_skills_matrix(extracted_skills_list: list, certifications: list = None, github_verified_skills: list = None) -> dict:
     """
     Builds candidate skills matrix Ws = 0.6*Pe + 0.4*Er.
-    If a skill is covered by an active industry certification, applies the
-    approved additive +15% credential boost: Ws = min(100, int(round(Ws * 1.15))).
+    - If a skill is covered by an active industry certification: applies +15% credential boost.
+    - If a skill is verified in candidate's GitHub repositories: applies +15 Project Evidence boost.
     """
     certifications = certifications or []
     certified_keywords = set()
@@ -130,6 +130,8 @@ def build_skills_matrix(extracted_skills_list: list, certifications: list = None
                 if sc:
                     certified_keywords.add(sc.lower().strip())
 
+    github_skills_lower = {s.lower().strip() for s in (github_verified_skills or [])}
+
     matrix = {}
     for s in extracted_skills_list:
         name_lower = s.get("name", "").lower().strip()
@@ -137,6 +139,15 @@ def build_skills_matrix(extracted_skills_list: list, certifications: list = None
             continue
         pe = s.get("project_evidence_score", 50)
         er = s.get("experience_recency_score", 50)
+
+        # Check if skill verified in GitHub codebases
+        is_github_verified = any(
+            gs and (gs in name_lower or name_lower in gs)
+            for gs in github_skills_lower
+        )
+        if is_github_verified:
+            pe = min(100, pe + 15)
+
         base_weight = int((0.6 * pe) + (0.4 * er))
         
         # Check if skill matches any certified keyword
@@ -151,7 +162,8 @@ def build_skills_matrix(extracted_skills_list: list, certifications: list = None
             "project_evidence": pe,
             "experience_recency": er,
             "is_certified": is_certified,
-            "credential_bonus": 1.15 if is_certified else 1.0
+            "credential_bonus": 1.15 if is_certified else 1.0,
+            "is_github_verified": is_github_verified
         }
     return matrix
 
@@ -160,6 +172,7 @@ def compute_profile_strength(profile) -> tuple:
     """
     Computes candidate profile strength (0-100) using the approved industry standard:
     P_overall = 0.45 * S_cognitive + 0.30 * S_projects_exp + 0.15 * S_certifications + 0.10 * S_academics
+    Enriches S_projects_exp with verified GitHub engineering score when available.
     Returns (profile_strength_score, breakdown_dict).
     """
     # 1. Cognitive Assessment Score (45%)
@@ -171,7 +184,16 @@ def compute_profile_strength(profile) -> tuple:
         for v in (profile.skills_matrix or {}).values() 
         if isinstance(v, dict)
     ]
-    s_projects_exp = float(sum(weights) / len(weights)) if weights else 40.0
+    mean_skills_weight = float(sum(weights) / len(weights)) if weights else 40.0
+
+    # Enrich with GitHub Engineering Production Score if screened
+    gh_metrics = getattr(profile, "github_metrics", {}) or {}
+    eng_score = float(gh_metrics.get("engineering_score", 0.0)) if isinstance(gh_metrics, dict) else 0.0
+
+    if eng_score > 0:
+        s_projects_exp = round((0.70 * mean_skills_weight) + (0.30 * eng_score), 2)
+    else:
+        s_projects_exp = round(mean_skills_weight, 2)
     
     # 3. Industry Certifications Score (15%)
     cert_count = len(profile.certifications or [])
@@ -202,7 +224,8 @@ def compute_profile_strength(profile) -> tuple:
         "cognitive_score": round(s_cognitive, 2),
         "projects_experience_score": round(s_projects_exp, 2),
         "certifications_score": round(s_cert, 2),
-        "academics_score": round(s_academics, 2)
+        "academics_score": round(s_academics, 2),
+        "github_engineering_score": round(eng_score, 2)
     }
     return p_overall, breakdown
 

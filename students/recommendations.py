@@ -103,8 +103,39 @@ def compute_personalized_recommendations(
         # Verified credential bonus (+5% if student verified knowledge via AI test)
         verif_bonus = 5.0 if student_profile.is_verified else 0.0
 
+        # NEP 2020 Multidisciplinary Minor Synergy Check (Clause 11.3)
+        minor_spec = (student_profile.minor_specialization or "").lower().strip()
+        is_nep_multidisciplinary_match = False
+        nep_match_reason = None
+        nep_synergy_bonus = 0.0
+
+        if minor_spec:
+            minor_kw_map = {
+                "data": ["python", "sql", "tableau", "powerbi", "pandas", "data analytics", "statistics", "excel", "machine learning"],
+                "analytics": ["python", "sql", "tableau", "powerbi", "pandas", "data analytics", "statistics", "excel"],
+                "finance": ["accounting", "valuation", "gst", "tally", "finance", "financial modeling", "excel", "dcf", "taxation"],
+                "fintech": ["accounting", "finance", "python", "sql", "blockchain", "payment gateways"],
+                "design": ["figma", "ui/ux", "wireframing", "adobe", "user research", "design thinking", "ui design", "ux design"],
+                "ui/ux": ["figma", "ui/ux", "wireframing", "adobe", "user research", "design thinking"],
+                "marketing": ["seo", "digital marketing", "content strategy", "salesforce", "crm", "growth"],
+                "management": ["operations management", "business analysis", "swot", "project management", "supply chain", "crm"],
+            }
+            relevant_kws = set()
+            for key, kw_list in minor_kw_map.items():
+                if key in minor_spec:
+                    relevant_kws.update(kw_list)
+            if not relevant_kws:
+                relevant_kws = {w.strip() for w in minor_spec.split() if len(w.strip()) > 2}
+
+            minor_matches = [s for s in req_skills if s.lower().strip() in relevant_kws]
+            if minor_matches:
+                is_nep_multidisciplinary_match = True
+                nep_synergy_bonus = 5.0
+                deg_label = student_profile.degree or "Major"
+                nep_match_reason = f"NEP 2020 Multidisciplinary Synergy: Bridges your {deg_label} with your '{student_profile.minor_specialization}' Minor ({', '.join(minor_matches[:3])})!"
+
         # Direct match percentage (0 - 100%)
-        match_pct = round(min(100.0, (overlap_ratio * 90.0) + role_bonus + verif_bonus), 1)
+        match_pct = round(min(100.0, (overlap_ratio * 85.0) + role_bonus + verif_bonus + nep_synergy_bonus), 1)
 
         if match_pct >= 75.0:
             fit_level = "High Match"
@@ -122,11 +153,14 @@ def compute_personalized_recommendations(
             "location": listing.location,
             "is_remote": listing.is_remote,
             "role_type": listing.role_type,
+            "min_nheqf_level": getattr(listing, 'min_nheqf_level', 'LEVEL_4_5') or 'LEVEL_4_5',
             "stipend_or_ctc": listing.stipend_or_ctc,
             "tenure": listing.tenure or "",
             "application_deadline": listing.application_deadline,
             "match_percentage": match_pct,
             "fit_level": fit_level,
+            "is_nep_multidisciplinary_match": is_nep_multidisciplinary_match,
+            "nep_match_reason": nep_match_reason,
             "matched_skills": matched,
             "missing_skills": missing,
             "required_skills": req_skills,

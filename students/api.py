@@ -52,8 +52,12 @@ from students.schemas import (
     StudentPreferencesUpdateIn,
     GovernmentSchemeOutSchema,
     GovernmentSchemeCreateIn,
-    LiveSchemesFeedOut
+    LiveSchemesFeedOut,
+    NEPTranscriptOutSchema,
+    GitHubRadarOutSchema,
+    GitHubSyncInSchema
 )
+from students.github_screening import screen_github_profile
 from recruiters.schemas import (
     CandidateJobSearchIn,
     CandidateJobSearchResponseOut,
@@ -82,6 +86,10 @@ def _student_to_out_schema(profile: StudentProfile) -> dict:
         "degree": profile.degree or "",
         "cgpa": profile.cgpa,
         "graduation_year": profile.graduation_year,
+        "apaar_id": getattr(profile, 'apaar_id', "") or "",
+        "abc_id": getattr(profile, 'abc_id', "") or "",
+        "minor_specialization": getattr(profile, 'minor_specialization', "") or "",
+        "nheqf_level": getattr(profile, 'nheqf_level', "LEVEL_6_0") or "LEVEL_6_0",
         "github_handle": profile.github_handle,
         "github_url": getattr(profile, 'github_url', "") or "",
         "linkedin_url": profile.linkedin_url or "",
@@ -102,7 +110,9 @@ def _student_to_out_schema(profile: StudentProfile) -> dict:
         "profile_strength_breakdown": breakdown,
         "is_verified": profile.is_verified,
         "gender": getattr(profile, 'gender', 'PREFER_NOT_TO_SAY') or 'PREFER_NOT_TO_SAY',
-        "preferences": profile.get_preferences() if hasattr(profile, 'get_preferences') else {}
+        "preferences": profile.get_preferences() if hasattr(profile, 'get_preferences') else {},
+        "github_metrics": getattr(profile, 'github_metrics', {}) or {},
+        "github_synced_at": profile.github_synced_at.isoformat() if getattr(profile, 'github_synced_at', None) else None
     }
 
 
@@ -173,6 +183,8 @@ def _student_to_portfolio_schema(profile: StudentProfile, is_blind: bool = False
         "achievements": getattr(profile, 'achievements', []) or [],
         "academic_records": getattr(profile, 'academic_records', []) or [],
         "active_internships": active_internships,
+        "nep_passport": profile.get_nep_passport() if hasattr(profile, 'get_nep_passport') else None,
+        "github_engineering_radar": profile.get_github_radar() if hasattr(profile, 'get_github_radar') else None,
         "is_blind": is_blind
     }
 
@@ -424,6 +436,14 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
         profile.cgpa = payload.cgpa
     if payload.graduation_year is not None:
         profile.graduation_year = payload.graduation_year
+    if payload.apaar_id is not None:
+        profile.apaar_id = payload.apaar_id
+    if payload.abc_id is not None:
+        profile.abc_id = payload.abc_id
+    if payload.minor_specialization is not None:
+        profile.minor_specialization = payload.minor_specialization
+    if payload.nheqf_level is not None:
+        profile.nheqf_level = payload.nheqf_level
     if payload.github_handle is not None:
         profile.github_handle = payload.github_handle
     if payload.github_url is not None:
@@ -500,19 +520,28 @@ def get_my_settings(request):
 
 
 @router.patch("/me/settings", response=StudentPreferencesSchema)
+@router.put("/me/settings", response=StudentPreferencesSchema)
 def update_my_settings(request, payload: StudentPreferencesUpdateIn):
     """
-    Update candidate's granular personalization preferences (notifications, features, privacy).
-    Supports disabling affirmative action displays, diversity job badges, or specific alert types.
+    Update candidate's granular personalization preferences:
+    - common: theme, language, timezone, email/in-app alerts, accessibility
+    - notifications: opportunity alerts, deadline reminders, scheme alerts
+    - features: affirmative action schemes, diversity badges, smart roadmap
+    - privacy: recruiter profile sharing, diversity hiring participation, DigiLocker sharing
+    - career_discovery: work arrangements, target domains, desired CTC
     """
     profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
     current = profile.get_preferences()
+    if payload.common is not None:
+        current["common"].update(payload.common)
     if payload.notifications is not None:
         current["notifications"].update(payload.notifications)
     if payload.features is not None:
         current["features"].update(payload.features)
     if payload.privacy is not None:
         current["privacy"].update(payload.privacy)
+    if payload.career_discovery is not None:
+        current["career_discovery"].update(payload.career_discovery)
     profile.preferences = current
     profile.save(update_fields=['preferences'])
     return current
@@ -533,6 +562,134 @@ def get_my_digital_portfolio(request):
     """
     profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
     return _student_to_portfolio_schema(profile, is_blind=False)
+
+
+@router.get("/me/nep-transcript", response={200: NEPTranscriptOutSchema, 404: dict}, auth=StudentAuth())
+def export_nep_academic_transcript(request):
+    """
+    NEP 2020 & DigiLocker-Ready Verified Academic Transcript Export:
+    Produces an official, cryptographically-hashed academic credit transcript
+    containing candidate APAAR ID, ABC ID, earned NCrF credits, AICTE activity points,
+    PARAKH holistic ratings, and verified supervisor-evaluated internship records.
+    Ready for ingestion by university examination cells and national credit portals.
+    """
+    import hashlib
+    profile = StudentProfile.objects.filter(user=request.auth).first()
+    if not profile:
+        return 404, {"message": "Candidate profile not found."}
+
+    passport = profile.get_nep_passport()
+    ncrf = passport["ncrf_credits"]
+    aicte = passport["aicte_activity_points"]
+    parakh = passport["parakh_assessment"]
+
+    hash_source = f"{profile.id}:{profile.apaar_id or 'NO_APAAR'}:{ncrf['total_ncrf_credits']}:{aicte['points_earned']}"
+    sha256_hash = hashlib.sha256(hash_source.encode('utf-8')).hexdigest()
+
+    user = profile.user
+    name = f"{user.first_name} {user.last_name}".strip() or user.username
+
+    return 200, {
+        "transcript_id": f"NEP-{profile.id}-{datetime.now().strftime('%Y%m%d%H%M')}",
+        "apaar_id": profile.apaar_id or "UNLINKED",
+        "abc_id": profile.abc_id or "UNLINKED",
+        "student_name": name,
+        "institution": profile.institution or "Verified Higher Education Institution",
+        "degree_major": profile.degree or "General Studies",
+        "minor_specialization": profile.minor_specialization or "None",
+        "nheqf_level": profile.nheqf_level,
+        "ncrf_credits_earned": ncrf["total_ncrf_credits"],
+        "aicte_activity_points": aicte["points_earned"],
+        "parakh_holistic_grade": parakh["parakh_grade"],
+        "parakh_holistic_score": parakh["overall_holistic_score"],
+        "verified_internship_records": getattr(profile, 'internships', []) or [],
+        "verified_certifications": getattr(profile, 'certifications', []) or [],
+        "digilocker_verification_status": "AUTHENTIC_VERIFIED" if passport["is_apaar_verified"] else "PENDING_VERIFICATION",
+        "digilocker_sha256_hash": sha256_hash,
+        "issued_at": datetime.now().isoformat()
+    }
+
+
+@router.post("/me/github-sync", response={200: GitHubRadarOutSchema, 400: dict}, auth=StudentAuth())
+def sync_candidate_github_profile(request, data: Optional[GitHubSyncInSchema] = None):
+    """
+    Public-Safe GitHub Screening & Anti-Vibe-Coding Radar:
+    Screens public repositories, commit cadence, conventional commits,
+    CI/CD workflows, Dockerfiles, and automated test suites.
+    Boosts skill weights (Pe) for verified technologies and recalculates candidate profile strength.
+    """
+    profile = get_object_or_404(StudentProfile, user=request.auth)
+    
+    handle = None
+    if data and data.github_handle:
+        handle = data.github_handle.strip()
+    elif profile.github_handle:
+        handle = profile.github_handle.strip()
+    elif profile.github_url:
+        handle = profile.github_url.strip()
+    elif data and data.repo_urls:
+        from students.github_screening import parse_repo_identifier
+        for u in data.repo_urls:
+            owner, _ = parse_repo_identifier(u)
+            if owner:
+                handle = owner
+                break
+        
+    if not handle and not (data and data.repo_urls):
+        return 400, {
+            "message": "Please provide a GitHub username, handle, or repository URLs to screen."
+        }
+        
+    selected_repos = data.selected_repos if data else None
+    repo_urls = data.repo_urls if data else None
+    token = data.github_token if data else None
+    radar = screen_github_profile(handle, token=token, selected_repos=selected_repos, repo_urls=repo_urls)
+    
+    if not radar.get("is_screened"):
+        return 400, {
+            "message": radar.get("summary", "Could not screen GitHub profile.")
+        }
+        
+    if radar.get("github_handle"):
+        profile.github_handle = radar["github_handle"]
+        if not profile.github_url:
+            profile.github_url = f"https://github.com/{radar['github_handle']}"
+            
+    profile.github_metrics = radar
+    profile.github_synced_at = timezone.now()
+    
+    # Boost skills_matrix for verified GitHub technologies
+    verified_skills = radar.get("synergy_skills_verified", [])
+    if profile.skills_matrix and verified_skills:
+        current_skills_list = []
+        for s_name, s_data in profile.skills_matrix.items():
+            if isinstance(s_data, dict):
+                current_skills_list.append({
+                    "name": s_name,
+                    "project_evidence_score": s_data.get("project_evidence", 50),
+                    "experience_recency_score": s_data.get("experience_recency", 50)
+                })
+        if current_skills_list:
+            profile.skills_matrix = build_skills_matrix(
+                extracted_skills_list=current_skills_list,
+                certifications=profile.certifications,
+                github_verified_skills=verified_skills
+            )
+            
+    p_strength = compute_profile_strength(profile)[0]
+    profile.profile_strength_score = p_strength
+    profile.save()
+    
+    return 200, radar
+
+
+@router.get("/me/github-radar", response={200: GitHubRadarOutSchema, 404: dict}, auth=StudentAuth())
+def get_candidate_github_radar(request):
+    """
+    Retrieves the candidate's cached GitHub Engineering & Anti-Vibe-Coding Radar.
+    """
+    profile = get_object_or_404(StudentProfile, user=request.auth)
+    return 200, profile.get_github_radar()
 
 
 @router.get("/{student_id}/portfolio", response={200: StudentPortfolioOutSchema, 404: dict})
@@ -655,10 +812,13 @@ def log_internship_milestone(request, application_id: int, payload: MilestoneLog
 # ---------------------------------------------------------
 
 @router.get("/generate-test", response={200: TestGenerationOutSchema, 400: dict})
-def get_student_screening_test(request, role_title: str):
+def get_student_screening_test(request, role_title: str, focus_repo: Optional[str] = None):
     """
     Generates a personalized, progressive 5-question technical screening test
     tailored to the student's resume profile, and saves the session in PostgreSQL.
+    Anti-Vibe-Coding: Grounds Question 4/5 in candidate's verified showcase repository.
+    Fairness: Intelligently excludes academic lab assignments and dead/dormant repos,
+    or specifically targets candidate's chosen 'focus_repo'.
     """
     profile = get_object_or_404(StudentProfile, user=request.auth)
     
@@ -669,11 +829,31 @@ def get_student_screening_test(request, role_title: str):
         
     try:
         skills_keys = list(profile.skills_matrix.keys())
+        all_gh_repos = (profile.github_metrics or {}).get("top_repositories", [])
+
+        # Fair Repository Selection:
+        # 1. If candidate passed focus_repo, find and prioritize it
+        # 2. Else prioritize candidate-selected/showcase repos and exclude academic labs / dead repos
+        selected_viva_repos = []
+        if focus_repo:
+            matched = [r for r in all_gh_repos if r.get("name", "").lower() == focus_repo.lower()]
+            if matched:
+                selected_viva_repos = matched
+
+        if not selected_viva_repos:
+            selected_viva_repos = [
+                r for r in all_gh_repos 
+                if r.get("is_eligible_for_viva", True) and not r.get("is_academic", False) and not r.get("is_dormant", False)
+            ]
+
+        if not selected_viva_repos and all_gh_repos:
+            selected_viva_repos = all_gh_repos[:1]
         
         test_session = AIGateway.generate_adaptive_test(
             role_title=role_title,
             skills=skills_keys,
-            projects=profile.projects
+            projects=profile.projects,
+            github_repos=selected_viva_repos
         )
         
         db_session = TestSession.objects.create(

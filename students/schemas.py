@@ -40,6 +40,15 @@ class ResumePreviewOutSchema(Schema):
 
 # --- GRANULAR PREFERENCES & PERSONALISATION SCHEMAS ---
 
+class CommonPreferencesSchema(Schema):
+    theme: str = "system"  # system, light, dark
+    language: str = "en"
+    timezone: str = "Asia/Kolkata"
+    email_alerts: bool = True
+    in_app_alerts: bool = True
+    high_contrast: bool = False
+    reduce_motion: bool = False
+
 class NotificationPreferencesSchema(Schema):
     opportunity_alerts: bool = True
     deadline_reminders: bool = True
@@ -55,16 +64,27 @@ class FeaturePreferencesSchema(Schema):
 class PrivacyPreferencesSchema(Schema):
     participate_in_diversity_hiring: bool = True
     share_profile_with_verified_recruiters: bool = True
+    auto_share_github_verified_badge: bool = True
+    allow_digilocker_credit_sharing: bool = True
+
+class CareerDiscoveryPreferencesSchema(Schema):
+    preferred_work_arrangement: str = "ALL"  # ALL, REMOTE, HYBRID, ON_SITE
+    minimum_desired_stipend_or_ctc: str = ""
+    target_domains: List[str] = []
 
 class StudentPreferencesSchema(Schema):
+    common: CommonPreferencesSchema = CommonPreferencesSchema()
     notifications: NotificationPreferencesSchema = NotificationPreferencesSchema()
     features: FeaturePreferencesSchema = FeaturePreferencesSchema()
     privacy: PrivacyPreferencesSchema = PrivacyPreferencesSchema()
+    career_discovery: CareerDiscoveryPreferencesSchema = CareerDiscoveryPreferencesSchema()
 
 class StudentPreferencesUpdateIn(Schema):
-    notifications: Optional[Dict[str, bool]] = None
-    features: Optional[Dict[str, bool]] = None
-    privacy: Optional[Dict[str, bool]] = None
+    common: Optional[Dict[str, Any]] = None
+    notifications: Optional[Dict[str, Any]] = None
+    features: Optional[Dict[str, Any]] = None
+    privacy: Optional[Dict[str, Any]] = None
+    career_discovery: Optional[Dict[str, Any]] = None
 
 class StudentProfileInSchema(Schema):
     bio: Optional[str] = None
@@ -90,6 +110,10 @@ class StudentProfileInSchema(Schema):
     academic_records: Optional[List[Dict[str, Any]]] = None
     placement_status: Optional[str] = "UNPLACED"
     preferences: Optional[Dict[str, Any]] = None
+    apaar_id: Optional[str] = None
+    abc_id: Optional[str] = None
+    minor_specialization: Optional[str] = None
+    nheqf_level: Optional[str] = None
 
 class StudentProfileOutSchema(Schema):
     id: int
@@ -104,6 +128,10 @@ class StudentProfileOutSchema(Schema):
     degree: Optional[str] = ""
     cgpa: Optional[float] = None
     graduation_year: Optional[int] = None
+    apaar_id: Optional[str] = None
+    abc_id: Optional[str] = None
+    minor_specialization: Optional[str] = None
+    nheqf_level: str = "LEVEL_6_0"
     github_handle: Optional[str] = None
     github_url: Optional[str] = ""
     linkedin_url: Optional[str] = ""
@@ -124,6 +152,63 @@ class StudentProfileOutSchema(Schema):
     profile_strength_breakdown: Optional[ProfileStrengthBreakdownSchema] = None
     is_verified: bool
     preferences: Dict[str, Any] = {}
+    github_metrics: Optional[Dict[str, Any]] = None
+    github_synced_at: Optional[str] = None
+
+# --- NEP 2020 ACADEMIC CREDIT PASSPORT & PARAKH SCHEMAS ---
+
+class NCRFCreditsBreakdownSchema(Schema):
+    total_ncrf_credits: int
+    internship_credits: int
+    certification_credits: int
+    total_internship_hours: int
+
+class AICTEActivityPointsSchema(Schema):
+    points_earned: int
+    target_points: int = 100
+    completion_percentage: float
+    verified_hours: int
+    is_target_met: bool
+
+class PARAKHAssessmentSchema(Schema):
+    overall_holistic_score: float
+    parakh_grade: str
+    cognitive_domain_score: float
+    practical_domain_score: float
+    vocational_domain_score: float
+    academic_domain_score: float
+    parakh_standard: str
+
+class NEPPassportOutSchema(Schema):
+    apaar_id: Optional[str] = None
+    abc_id: Optional[str] = None
+    is_apaar_verified: bool = False
+    nheqf_level: str = "LEVEL_6_0"
+    nheqf_level_display: Optional[str] = None
+    major_degree: str = "General Studies"
+    minor_specialization: Optional[str] = None
+    ncrf_credits: NCRFCreditsBreakdownSchema
+    aicte_activity_points: AICTEActivityPointsSchema
+    parakh_assessment: PARAKHAssessmentSchema
+
+class NEPTranscriptOutSchema(Schema):
+    transcript_id: str
+    apaar_id: str
+    abc_id: str
+    student_name: str
+    institution: str
+    degree_major: str
+    minor_specialization: Optional[str] = None
+    nheqf_level: str
+    ncrf_credits_earned: int
+    aicte_activity_points: int
+    parakh_holistic_grade: str
+    parakh_holistic_score: float
+    verified_internship_records: List[Dict[str, Any]] = []
+    verified_certifications: List[Dict[str, Any]] = []
+    digilocker_verification_status: str = "AUTHENTIC_VERIFIED"
+    digilocker_sha256_hash: str
+    issued_at: str
 
 # --- DIGITAL PORTFOLIO & INTERNSHIP MILESTONE SCHEMAS (PS REQUIREMENT) ---
 
@@ -136,6 +221,54 @@ class AchievementItemSchema(Schema):
 
 class AchievementsUpdateInSchema(Schema):
     achievements: List[AchievementItemSchema]
+
+# --- GITHUB SCREENING & ANTI-VIBE-CODING RADAR SCHEMAS ---
+
+class GitHubRepositoryDetailSchema(Schema):
+    name: str
+    description: Optional[str] = ""
+    stars: int = 0
+    forks: int = 0
+    languages: List[str] = []
+    has_ci_cd: bool = False
+    has_docker: bool = False
+    has_tests: bool = False
+    has_linter: bool = False
+    has_readme: bool = True
+    relevance_tier: str = "SHOWCASE"
+    is_academic: bool = False
+    is_dormant: bool = False
+    is_eligible_for_viva: bool = True
+    is_selected_for_test: bool = True
+    relevance_reason: Optional[str] = ""
+    html_url: str
+
+class GitHubRadarOutSchema(Schema):
+    github_handle: str
+    is_screened: bool = False
+    is_presentation_fallback: bool = False
+    engineering_score: float = 0.0
+    anti_vibe_index: float = 0.0
+    badge: Optional[str] = "Unscreened"
+    summary: Optional[str] = ""
+    public_repos_count: int = 0
+    total_stars: int = 0
+    total_commits_analyzed: int = 0
+    conventional_commits_pct: float = 0.0
+    has_ci_cd: bool = False
+    has_docker: bool = False
+    has_tests: bool = False
+    has_linter: bool = False
+    top_languages: List[str] = []
+    top_repositories: List[GitHubRepositoryDetailSchema] = []
+    synergy_skills_verified: List[str] = []
+    synced_at: Optional[str] = None
+
+class GitHubSyncInSchema(Schema):
+    github_handle: Optional[str] = None
+    github_token: Optional[str] = None
+    selected_repos: Optional[List[str]] = None
+    repo_urls: Optional[List[str]] = None  # Upfront list of showcase repositories (URLs, 'owner/repo', or repo names)
 
 class StudentPortfolioOutSchema(Schema):
     id: int
@@ -167,6 +300,8 @@ class StudentPortfolioOutSchema(Schema):
     achievements: List[Dict[str, Any]] = []
     academic_records: List[Dict[str, Any]] = []
     active_internships: List[Dict[str, Any]] = []
+    nep_passport: Optional[NEPPassportOutSchema] = None
+    github_engineering_radar: Optional[GitHubRadarOutSchema] = None
     is_blind: bool = False
 
 class MilestoneLogCreateIn(Schema):
@@ -314,11 +449,14 @@ class PersonalizedRecommendationItemOut(Schema):
     location: str
     is_remote: bool
     role_type: str
+    min_nheqf_level: Optional[str] = "LEVEL_4_5"
     stipend_or_ctc: str
     tenure: Optional[str] = ""
     application_deadline: Optional[datetime] = None
     match_percentage: float
     fit_level: str
+    is_nep_multidisciplinary_match: bool = False
+    nep_match_reason: Optional[str] = None
     matched_skills: List[str] = []
     missing_skills: List[str] = []
     required_skills: List[str] = []

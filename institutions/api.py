@@ -12,6 +12,7 @@ from institutions.schemas import (
     InstitutionOut, InstitutionCreateIn,
     DepartmentOut, DepartmentCreateIn,
     FacultyProfileOut, FacultyProfileUpdateIn,
+    FacultySettingsOutSchema, FacultySettingsUpdateIn,
     PlacementOverviewOut,
     BranchWiseReportOut, BranchPlacementStatOut,
     StudentRosterReportOut, StudentPlacementStatusOut, StudentOfferDetail,
@@ -183,8 +184,46 @@ def get_faculty_profile(request):
         employee_id=fp.employee_id,
         contact_phone=fp.contact_phone or user.phone_number or "",
         is_institution_admin=fp.is_institution_admin,
+        preferences=fp.get_preferences(),
         created_at=fp.created_at
     )
+
+
+@institutions_router.get("/faculty/me/settings", response={200: FacultySettingsOutSchema, 400: dict}, auth=AcademiaAuth())
+@institutions_router.get("/me/settings", response={200: FacultySettingsOutSchema, 400: dict}, auth=AcademiaAuth())
+def get_faculty_settings(request):
+    """
+    Retrieve authenticated faculty/TPO's placement alerts, curriculum radar, and DigiLocker preferences.
+    """
+    fp, _ = FacultyProfile.objects.get_or_create(user=request.auth)
+    return 200, fp.get_preferences()
+
+
+@institutions_router.put("/faculty/me/settings", response={200: FacultySettingsOutSchema, 400: dict}, auth=AcademiaAuth())
+@institutions_router.patch("/faculty/me/settings", response={200: FacultySettingsOutSchema, 400: dict}, auth=AcademiaAuth())
+@institutions_router.put("/me/settings", response={200: FacultySettingsOutSchema, 400: dict}, auth=AcademiaAuth())
+@institutions_router.patch("/me/settings", response={200: FacultySettingsOutSchema, 400: dict}, auth=AcademiaAuth())
+def update_faculty_settings(request, payload: FacultySettingsUpdateIn):
+    """
+    Update faculty/institutional granular preferences:
+    - common: theme, language, timezone, email/in-app alerts, accessibility
+    - placement_oversight: auto-verify internship milestones, unplaced alerts, skill deficit threshold
+    - curriculum_analytics: national/state benchmark comparison, vocational tracks, recruiter sharing
+    - faculty_exposure: FDP and industrial training alerts, consultancy invitations
+    """
+    fp, _ = FacultyProfile.objects.get_or_create(user=request.auth)
+    current = fp.get_preferences()
+    if payload.common is not None:
+        current["common"].update(payload.common)
+    if payload.placement_oversight is not None:
+        current["placement_oversight"].update(payload.placement_oversight)
+    if payload.curriculum_analytics is not None:
+        current["curriculum_analytics"].update(payload.curriculum_analytics)
+    if payload.faculty_exposure is not None:
+        current["faculty_exposure"].update(payload.faculty_exposure)
+    fp.preferences = current
+    fp.save(update_fields=['preferences'])
+    return 200, current
 
 
 @institutions_router.put("/faculty/me", response=FacultyProfileOut, auth=AcademiaAuth())
