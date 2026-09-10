@@ -44,7 +44,7 @@ db.sqlite3-journal
 media/
 staticfiles/
 
-# IDE & editors
+# IDE, Editors & OS Files
 .vscode/
 .idea/
 *.swp
@@ -52,3 +52,19 @@ staticfiles/
 *~
 .DS_Store
 Thumbs.db
+
+# AI Agents & IDE Workspace Files
+.agents/
+.gemini/
+.system_generated/
+scratch/
+GEMINI.md
+
+# Temporary & Test Caches
+*.tmp
+*.bak
+*.cache
+*.orig
+.pytest_cache/
+.coverage
+htmlcov/

@@ -140,13 +140,13 @@ class ResilientGrader:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
         system_prompt = (
-            "You are a strict and objective technical examiner. Grade the candidate's answer to the "
-            "viva question based on the provided expert grading rubric. "
+            "You are a strict and objective domain-expert examiner. Grade the candidate's answer to the "
+            "viva question based on the provided expert grading rubric across their field of study or professional domain. "
             "You must score the answer strictly on a scale of 0 to 100.\n\n"
             "Use these explicit rubric anchors:\n"
-            "- Score 90-100: Excellent answer. Mentions core concepts, specific tools/architectures, and real engineering trade-offs.\n"
-            "- Score 50-80: Acceptable answer. Understands the basic concepts but lacks implementation metrics or deep details.\n"
-            "- Score 10-40: Weak answer. Vague, superficial mentions of keywords with no real technical comprehension.\n"
+            "- Score 90-100: Excellent answer. Mentions core concepts, specific methodologies/tools/metrics, and practical trade-offs.\n"
+            "- Score 50-80: Acceptable answer. Understands the basic concepts but lacks specific operational or practical details.\n"
+            "- Score 10-40: Weak answer. Vague, superficial mentions of keywords with no real domain comprehension.\n"
             "- Score 0: Irrelevant, empty, or plagiarized answer.\n\n"
             "You must return ONLY a structured JSON object matching this exact schema:\n"
             "{\n"
