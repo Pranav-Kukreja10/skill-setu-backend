@@ -476,5 +476,6 @@ Run `npm run dev` to verify real-time communication:
 
 ---
 
-## 📜 License
-This project is developed for the Smart India Hackathon (SIH) under the MIT License.
+<img width="1919" height="987" alt="image" src="https://github.com/user-attachments/assets/5d0a653d-de0e-4bc7-9bf1-f2ab4894e0d4" />
+
+
