@@ -15,22 +15,41 @@ class AIGateway:
     to dedicated Gemini models to optimize response times and free-tier RPD quotas.
     """
     
+    # Model Tier Definitions based on your AI Studio Limits
+    MODEL_RESUME_PARSER = "gemini-3.1-flash-lite"
+    MODEL_TEST_GENERATOR = "gemini-3.5-flash-lite"
+    
     @staticmethod
     def extract_skills_and_projects(raw_text: str) -> dict:
         """
         Task 1: Resume Extraction. Routed strictly to gemini-3.1-flash-lite.
+        Extracts skills with project evidence and experience recency ratings.
         """
         provider = os.getenv("AI_PROVIDER", "local").lower()
         
         if provider == "cloud":
-            model = os.getenv("MODEL_RESUME_PARSER", "gemini-3.1-flash-lite")
+            model = os.getenv("MODEL_RESUME_PARSER", AIGateway.MODEL_RESUME_PARSER)
             
             response_schema = {
                 "type": "OBJECT",
                 "properties": {
                     "skills": {
                         "type": "ARRAY",
-                        "items": {"type": "STRING"}
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "name": {"type": "STRING"},
+                                "project_evidence_score": {
+                                    "type": "INTEGER", 
+                                    "description": "0-100 score of how deeply applied and complex this skill is inside their listed projects"
+                                },
+                                "experience_recency_score": {
+                                    "type": "INTEGER", 
+                                    "description": "0-100 score of how recent and tenure-backed this skill is inside their professional experience"
+                                }
+                            },
+                            "required": ["name", "project_evidence_score", "experience_recency_score"]
+                        }
                     },
                     "projects": {
                         "type": "ARRAY",
@@ -46,33 +65,129 @@ class AIGateway:
                             },
                             "required": ["title", "technologies", "description"]
                         }
+                    },
+                    "target_roles": {
+                        "type": "ARRAY",
+                        "items": {"type": "STRING"},
+                        "description": "Job titles or target roles candidate is seeking, inferred from resume headline, summary, and experience"
+                    },
+                    "current_designation": {
+                        "type": "STRING",
+                        "description": "Candidate's current or most recent job title or professional identity"
+                    },
+                    "experience_years": {
+                        "type": "NUMBER",
+                        "description": "Estimated total years of work/professional experience (0 for freshers/students)"
+                    },
+                    "academic_credentials": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "institution": {"type": "STRING"},
+                            "degree": {"type": "STRING"},
+                            "department": {"type": "STRING"},
+                            "cgpa": {"type": "NUMBER"},
+                            "graduation_year": {"type": "INTEGER"}
+                        }
+                    },
+                    "skills_categorized": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "technical_skills": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            "frameworks": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            "tools": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            "soft_skills": {"type": "ARRAY", "items": {"type": "STRING"}}
+                        }
+                    },
+                    "social_links": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "github": {"type": "STRING"},
+                            "linkedin": {"type": "STRING"},
+                            "portfolio": {"type": "STRING"}
+                        }
+                    },
+                    "certifications": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "name": {"type": "STRING"},
+                                "issuer": {"type": "STRING"},
+                                "issue_year": {"type": "INTEGER"},
+                                "credential_url": {"type": "STRING"},
+                                "skills_covered": {"type": "ARRAY", "items": {"type": "STRING"}}
+                            },
+                            "required": ["name"]
+                        }
                     }
                 },
-                "required": ["skills", "projects"]
+                "required": ["skills", "projects", "target_roles"]
             }
 
             prompt = (
-                f"Analyze the following resume text. Extract all technical/vocational skills "
-                f"and personal projects. Return ONLY a JSON object matching this schema.\n\n"
+                f"You are an expert multi-domain resume parser. Analyze the following candidate resume text across ANY professional domain "
+                f"(Business Administration, Management, Finance, Commerce, Engineering, Technology, Design, Accounting, Marketing, Human Resources, Supply Chain, etc.).\n"
+                f"Extract:\n"
+                f"1. 'skills': List of all domain-specific skills, functional competencies, and software/tools. Assign:\n"
+                f"   - 'project_evidence_score' (0-100): How deeply applied/demonstrated is this skill in projects, case studies, audits, or portfolio deliverables?\n"
+                f"   - 'experience_recency_score' (0-100): How recent and tenure-backed is this skill across work or internship experience?\n"
+                f"2. 'projects': Academic, personal, or professional initiatives (title, technologies/tools/methods used, description of outcomes/impact).\n"
+                f"3. 'target_roles': 1-4 specific job titles candidate is qualified for or seeking (e.g. 'Financial Analyst', 'UI/UX Designer', 'Accountant', 'Marketing Associate', 'Software Engineer').\n"
+                f"4. 'academic_credentials': institution, degree (e.g. BBA, MBA, B.Com, B.Tech, M.Com, BE, B.Des), department, cgpa, graduation_year.\n"
+                f"5. 'current_designation': Most recent job title or professional title (leave empty if student/fresher).\n"
+                f"6. 'experience_years': Total years of professional work experience (0.0 if student or fresher).\n"
+                f"7. 'skills_categorized': Group extracted competencies dynamically into:\n"
+                f"   - 'technical_skills': Core functional/domain skills (e.g., Financial Modeling, Auditing, User Research, Python, Tax Filing, Brand Strategy, CAD).\n"
+                f"   - 'frameworks': Methodologies, standard practices, regulatory standards, or architectures (e.g., GAAP, IFRS, Agile, Scrum, Design Thinking, Six Sigma, SWOT, React, Django).\n"
+                f"   - 'tools': Software, platforms, utilities, and applications (e.g., Excel, Tally, SAP, Figma, Tableau, Salesforce, Docker, Bloomberg, QuickBooks, Jira).\n"
+                f"   - 'soft_skills': Leadership, stakeholder communication, negotiation, problem-solving, collaboration.\n"
+                f"8. 'social_links': github, linkedin, portfolio URLs if present.\n"
+                f"9. 'certifications': Professional certifications, accreditations, or licenses (e.g. AWS Certified, CFA, NPTEL, Coursera Meta, Figma Certified, CPA) with name, issuer, issue_year, and covered skills.\n\n"
+                f"Return ONLY a JSON object matching the schema.\n\n"
                 f"Resume Text:\n{raw_text[:6000]}"
             )
 
-            return AIGateway._execute_gemini_request(model, prompt, response_schema)
+            res = AIGateway._execute_gemini_request(model, prompt, response_schema)
+            if isinstance(res, dict):
+                res.setdefault("current_designation", "")
+                res.setdefault("experience_years", 0.0)
+                res.setdefault("academic_credentials", {})
+                res.setdefault("skills_categorized", {"technical_skills": [], "frameworks": [], "tools": [], "soft_skills": []})
+                res.setdefault("social_links", {})
+                res.setdefault("certifications", [])
+            return res
             
         elif provider == "local":
-            return OllamaClient.analyze_resume_text(raw_text)
+            res = OllamaClient.analyze_resume_text(raw_text)
+            if isinstance(res, dict):
+                res.setdefault("current_designation", "")
+                res.setdefault("experience_years", 0.0)
+                res.setdefault("academic_credentials", {})
+                res.setdefault("skills_categorized", {"technical_skills": [], "frameworks": [], "tools": [], "soft_skills": []})
+                res.setdefault("social_links", {})
+            return res
         else:
-            return {"skills": ["Python", "Django", "PostgreSQL", "Git"], "projects": []}
+            return {
+                "skills": [],
+                "projects": [],
+                "target_roles": [],
+                "current_designation": "",
+                "experience_years": 0.0,
+                "academic_credentials": {},
+                "skills_categorized": {"technical_skills": [], "frameworks": [], "tools": [], "soft_skills": []},
+                "social_links": {}
+            }
 
     @staticmethod
     def generate_adaptive_test(role_title: str, skills: list, projects: list) -> dict:
         """
         Task 2: Progressive Test Generation. Routed strictly to gemini-3.5-flash-lite.
+        Universally assesses candidates across any professional domain.
         """
         provider = os.getenv("AI_PROVIDER", "local").lower()
         
         if provider == "cloud":
-            model = os.getenv("MODEL_TEST_GENERATOR", "gemini-3.5-flash-lite")
+            model = os.getenv("MODEL_TEST_GENERATOR", AIGateway.MODEL_TEST_GENERATOR)
             
             response_schema = {
                 "type": "OBJECT",
@@ -101,16 +216,16 @@ class AIGateway:
             }
 
             prompt = (
-                f"You are a strict technical interviewer. Generate a personalized 5-question test for a candidate "
+                f"You are an expert domain interviewer across any professional industry. Generate a personalized 5-question test for a candidate "
                 f"applying for the role of '{role_title}'.\n"
                 f"Candidate Extracted Skills: {skills}\n"
-                f"Candidate Projects: {projects}\n\n"
-                f"Enforce these strict progressive difficulty criteria:\n"
-                f"1. Question 1 (MCQ - EASY): Core language/tool syntax check. Focus on basic code literacy.\n"
-                f"2. Question 2 (MCQ - EASY): Basic framework mechanics.\n"
-                f"3. Question 3 (MCQ - MEDIUM): Directly target a technical choice made in one of their listed projects.\n"
-                f"4. Question 4 (VIVA - MEDIUM): Open-ended question asking the candidate to explain their architectural patterns.\n"
-                f"5. Question 5 (VIVA - HARD): High-load, system failure, or optimization stress test matching their technology stack.\n\n"
+                f"Candidate Projects/Experience Deliverables: {projects}\n\n"
+                f"Enforce these progressive difficulty criteria adapted to the specific domain of '{role_title}':\n"
+                f"1. Question 1 (MCQ - EASY): Core terminology, fundamental principle, or tool literacy check.\n"
+                f"2. Question 2 (MCQ - EASY): Basic methodology, framework, regulatory standard, or design principle application.\n"
+                f"3. Question 3 (MCQ - MEDIUM): Directly target a strategic, technical, or procedural decision from their listed projects or case studies.\n"
+                f"4. Question 4 (VIVA - MEDIUM): Open-ended question asking the candidate to explain their methodology, architectural patterns, or workflow strategy.\n"
+                f"5. Question 5 (VIVA - HARD): High-stakes scenario, edge case, audit challenge, trade-off analysis, or crisis response matching their field.\n\n"
                 f"For VIVA questions, set 'options' to null and 'correct_answer' to null, and write a detailed "
                 f"grading rubric explanation of what a high-quality answer must mention."
             )

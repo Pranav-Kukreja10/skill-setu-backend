@@ -42,43 +42,56 @@ def extract_text_from_file(file) -> str:
     else:
         raise ValueError("Unsupported file format. Please upload a PDF, DOCX, TXT, or MD file.")
 
+
 # --- DYNAMIC MULTI-DOMAIN BENCHMARKING MATCHING ENGINE ---
 
-def calculate_role_score(extracted_skills: list, benchmark: JobBenchmark) -> int:
+def calculate_role_score(skills_matrix: dict, benchmark: JobBenchmark) -> int:
     """
-    Calculates a normalized score (0-100) comparing extracted skills against 
-    dynamic database job benchmarks.
+    Calculates a normalized score (0-100) comparing the weighted skills matrix 
+    against database benchmarks.
     """
-    extracted_lower = [s.lower() for s in extracted_skills]
+    # Keys of skills_matrix are already lowercase skill names
+    extracted_lower = [s.lower() for s in skills_matrix.keys()]
     
-    # Substring intersection matching to catch plural variations and edge cases
-    matched_core = [s for s in benchmark.core_skills if any(s.lower() in ext for ext in extracted_lower)]
-    matched_method = [s for s in benchmark.methodology_skills if any(s.lower() in ext for ext in extracted_lower)]
-    matched_tooling = [s for s in benchmark.tooling_skills if any(s.lower() in ext for ext in extracted_lower)]
-    
-    core_score = (len(matched_core) / len(benchmark.core_skills)) * 100 if benchmark.core_skills else 0
-    method_score = (len(matched_method) / len(benchmark.methodology_skills)) * 100 if benchmark.methodology_skills else 0
-    tooling_score = (len(matched_tooling) / len(benchmark.tooling_skills)) * 100 if benchmark.tooling_skills else 0
+    def get_skill_score_sum(benchmark_list):
+        if not benchmark_list:
+            return 0
+        total_weight = 0
+        match_count = 0
+        for skill in benchmark_list:
+            skill_lower = skill.lower().strip()
+            # Substring intersection checks
+            matched_key = next((ext for ext in extracted_lower if skill_lower in ext or ext in skill_lower), None)
+            if matched_key:
+                match_count += 1
+                total_weight += skills_matrix[matched_key].get("weight", 50)
+                
+        match_ratio = match_count / len(benchmark_list)
+        avg_weight = (total_weight / match_count) if match_count > 0 else 0
+        # Incorporate skill weight alignment directly into math rating
+        return (match_ratio * avg_weight)
+
+    core_score = get_skill_score_sum(benchmark.core_skills)
+    method_score = get_skill_score_sum(benchmark.methodology_skills)
+    tooling_score = get_skill_score_sum(benchmark.tooling_skills)
     
     # Weighted Scoring Matrix: 50% Core Skills, 30% Methodologies, 20% Tooling & Software
     final_score = int((0.5 * core_score) + (0.3 * method_score) + (0.2 * tooling_score))
     return min(final_score, 100)
 
-def generate_role_fit_matrix(extracted_skills: list) -> dict:
+def generate_role_fit_matrix(skills_matrix: dict) -> dict:
     """
     Generates the multi-role fitment scores dynamically using 
     active database benchmarks stored in PostgreSQL.
-    
-    Filters out any role where the candidate has a <= 5% match,
-    ensuring only relevant branch/career options are displayed.
+    Filters out any role where the candidate has a <= 5% match.
     """
     matrix = {}
     benchmarks = JobBenchmark.objects.select_related('sector').all()
     
     for benchmark in benchmarks:
-        score = calculate_role_score(extracted_skills, benchmark)
+        score = calculate_role_score(skills_matrix, benchmark)
         
-        # UX FILTER: Skip displaying completely irrelevant career paths (e.g., 0% matches)
+        # UX FILTER: Hide completely irrelevant cards
         if score <= 5:
             continue
         
@@ -93,7 +106,103 @@ def generate_role_fit_matrix(extracted_skills: list) -> dict:
             "score": score,
             "fit_level": fit_level,
             "sector": benchmark.sector.name,
-            "verified_confidence_score": None  # Will be populated when they pass the dynamic test
+            "verified_confidence_score": None
         }
     return matrix
+
+
+# --- SKILL CREDENTIAL BOOST & CANDIDATE PROFILE STRENGTH ---
+
+def build_skills_matrix(extracted_skills_list: list, certifications: list = None) -> dict:
+    """
+    Builds candidate skills matrix Ws = 0.6*Pe + 0.4*Er.
+    If a skill is covered by an active industry certification, applies the
+    approved additive +15% credential boost: Ws = min(100, int(round(Ws * 1.15))).
+    """
+    certifications = certifications or []
+    certified_keywords = set()
+    for cert in certifications:
+        if isinstance(cert, dict):
+            cert_name = cert.get("name", "").lower()
+            if cert_name:
+                certified_keywords.add(cert_name)
+            for sc in cert.get("skills_covered", []):
+                if sc:
+                    certified_keywords.add(sc.lower().strip())
+
+    matrix = {}
+    for s in extracted_skills_list:
+        name_lower = s.get("name", "").lower().strip()
+        if not name_lower:
+            continue
+        pe = s.get("project_evidence_score", 50)
+        er = s.get("experience_recency_score", 50)
+        base_weight = int((0.6 * pe) + (0.4 * er))
+        
+        # Check if skill matches any certified keyword
+        is_certified = any(
+            kw and (kw in name_lower or name_lower in kw)
+            for kw in certified_keywords
+        )
+        boosted_weight = min(100, int(round(base_weight * 1.15))) if is_certified else base_weight
+
+        matrix[name_lower] = {
+            "weight": boosted_weight,
+            "project_evidence": pe,
+            "experience_recency": er,
+            "is_certified": is_certified,
+            "credential_bonus": 1.15 if is_certified else 1.0
+        }
+    return matrix
+
+
+def compute_profile_strength(profile) -> tuple:
+    """
+    Computes candidate profile strength (0-100) using the approved industry standard:
+    P_overall = 0.45 * S_cognitive + 0.30 * S_projects_exp + 0.15 * S_certifications + 0.10 * S_academics
+    Returns (profile_strength_score, breakdown_dict).
+    """
+    # 1. Cognitive Assessment Score (45%)
+    s_cognitive = float(profile.overall_confidence_score or 0.0)
+    
+    # 2. Projects & Applied Experience Score (30%)
+    weights = [
+        v.get("weight", 50) 
+        for v in (profile.skills_matrix or {}).values() 
+        if isinstance(v, dict)
+    ]
+    s_projects_exp = float(sum(weights) / len(weights)) if weights else 40.0
+    
+    # 3. Industry Certifications Score (15%)
+    cert_count = len(profile.certifications or [])
+    if cert_count >= 3:
+        s_cert = 100.0
+    elif cert_count == 2:
+        s_cert = 85.0
+    elif cert_count == 1:
+        s_cert = 70.0
+    else:
+        s_cert = 0.0
+        
+    # 4. Academic Performance Score (10%)
+    if profile.cgpa is not None:
+        s_academics = min(100.0, float(profile.cgpa) * 10.0)
+    else:
+        s_academics = 70.0  # campus baseline
+        
+    p_overall = round(
+        (0.45 * s_cognitive) +
+        (0.30 * s_projects_exp) +
+        (0.15 * s_cert) +
+        (0.10 * s_academics),
+        2
+    )
+    
+    breakdown = {
+        "cognitive_score": round(s_cognitive, 2),
+        "projects_experience_score": round(s_projects_exp, 2),
+        "certifications_score": round(s_cert, 2),
+        "academics_score": round(s_academics, 2)
+    }
+    return p_overall, breakdown
 

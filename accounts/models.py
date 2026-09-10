@@ -3,7 +3,8 @@ from django.db import models
 
 class User(AbstractUser):
     class Role(models.TextChoices):
-        STUDENT = 'STUDENT', 'Student'
+        STUDENT = 'STUDENT', 'Student / Candidate'
+        CANDIDATE = 'CANDIDATE', 'Candidate / Job Seeker'
         RECRUITER = 'RECRUITER', 'Industry Recruiter'
         ACADEMIA = 'ACADEMIA', 'Academia Representative'
         ADMIN = 'ADMIN', 'System Administrator'
@@ -17,7 +18,10 @@ class User(AbstractUser):
     phone_number = models.CharField(max_length=15, blank=True, null=True)
 
     def is_student(self) -> bool:
-        return self.role == self.Role.STUDENT
+        return self.role in [self.Role.STUDENT, self.Role.CANDIDATE]
+
+    def is_candidate(self) -> bool:
+        return self.role in [self.Role.STUDENT, self.Role.CANDIDATE]
 
     def is_recruiter(self) -> bool:
         return self.role == self.Role.RECRUITER
