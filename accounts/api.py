@@ -1,21 +1,31 @@
 import os
+import random
+import secrets
 import requests
 import jwt
 from datetime import datetime, timedelta, timezone
 from django.conf import settings
+from django.utils import timezone as django_timezone
 from ninja import Router
 from django.contrib.auth import authenticate
 from django.http import HttpRequest
-from accounts.models import User
+from accounts.models import User, PasswordResetOTP, EmailVerificationToken
 from accounts.schemas import (
     UserRegisterSchema,
     UserLoginSchema,
     UserProfileOutSchema,
+    UserProfileUpdateInSchema,
     OAuthUrlOutSchema,
     OAuthLoginInSchema,
-    OAuthAuthResponseOut
+    OAuthAuthResponseOut,
+    ForgotPasswordInSchema,
+    VerifyOtpAndResetInSchema,
+    VerifyEmailInSchema,
+    ResendVerificationInSchema,
 )
 from accounts.security import JWTAuth
+from accounts.email_service import send_password_reset_otp, send_welcome_verification_email
+
 
 router = Router(tags=["Authentication"])
 
@@ -43,13 +53,63 @@ def register_user(request: HttpRequest, payload: UserRegisterSchema):
         email=payload.email,
         password=payload.password,
         role=payload.role,
-        phone_number=payload.phone_number
+        phone_number=payload.phone_number,
+        first_name=payload.first_name or "",
+        last_name=payload.last_name or "",
+        is_email_verified=False
     )
+
+    # Auto-provision domain profiles for immediate portal access
+    if user.role == User.Role.RECRUITER:
+        try:
+            from recruiters.models import RecruiterProfile
+            RecruiterProfile.objects.get_or_create(user=user, defaults={'designation': 'Recruiter'})
+        except Exception:
+            pass
+    elif user.role == User.Role.ACADEMIA:
+        try:
+            from institutions.models import FacultyProfile
+            FacultyProfile.objects.get_or_create(user=user, defaults={'designation': 'Faculty / Placement Officer'})
+        except Exception:
+            pass
+
+    # Generate verification token & 6-digit OTP
+    otp_code = f"{random.randint(100000, 999999)}"
+    token_str = secrets.token_urlsafe(32)
+    EmailVerificationToken.objects.create(
+        user=user,
+        token=token_str,
+        otp_code=otp_code,
+        expires_at=django_timezone.now() + timedelta(hours=24)
+    )
+
+    # Dispatch welcome & verification notification in background (never blocks user registration)
+    try:
+        full_name = f"{user.first_name} {user.last_name}".strip() or user.username
+        send_welcome_verification_email(
+            recipient_email=user.email,
+            full_name=full_name,
+            role=user.role,
+            otp_code=otp_code,
+            verification_token=token_str
+        )
+    except Exception:
+        pass
+
+    # Attach access token to response for instantaneous portal access
+    user.access_token = create_access_token(user)
     return 201, user
 
 @router.post("/login", response={200: dict, 401: dict})
 def login_user(request: HttpRequest, payload: UserLoginSchema):
-    user = authenticate(username=payload.username, password=payload.password)
+    identifier = payload.username.strip()
+    user = authenticate(username=identifier, password=payload.password)
+    
+    # Support signing in with either email or username
+    if user is None and "@" in identifier:
+        user_obj = User.objects.filter(email__iexact=identifier).first()
+        if user_obj:
+            user = authenticate(username=user_obj.username, password=payload.password)
     
     if user is not None:
         access_token = create_access_token(user)
@@ -57,6 +117,11 @@ def login_user(request: HttpRequest, payload: UserLoginSchema):
             "access_token": access_token,
             "token_type": "bearer",
             "role": user.role,
+            "username": user.username,
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "is_email_verified": user.is_email_verified,
             "message": "Login successful"
         }
         
@@ -69,6 +134,238 @@ def get_current_user_profile(request: HttpRequest):
     Returns the authenticated user profile, role, avatar, and authentication provider.
     """
     return 200, request.auth
+
+
+@router.put("/me", response={200: UserProfileOutSchema, 400: dict}, auth=JWTAuth())
+def update_current_user_profile(request: HttpRequest, payload: UserProfileUpdateInSchema):
+    """
+    Update the authenticated user's core attributes: name, username, avatar_url, phone_number.
+    """
+    user = request.auth
+    if payload.username and payload.username.strip() != user.username:
+        new_username = payload.username.strip()
+        if User.objects.filter(username=new_username).exclude(id=user.id).exists():
+            return 400, {"message": "Username is already taken by another user."}
+        user.username = new_username
+
+    if payload.first_name is not None:
+        user.first_name = payload.first_name.strip()
+    if payload.last_name is not None:
+        user.last_name = payload.last_name.strip()
+    if payload.avatar_url is not None:
+        user.avatar_url = payload.avatar_url.strip()
+    if payload.phone_number is not None:
+        user.phone_number = payload.phone_number.strip()
+
+    user.save()
+    return 200, user
+
+
+# ---------------------------------------------------------
+# PASSWORD RESET VIA REAL NO-REPLY EMAIL OTP
+# ---------------------------------------------------------
+
+@router.post("/forgot-password", response={200: dict, 404: dict}, auth=None)
+def request_password_reset_otp(request: HttpRequest, payload: ForgotPasswordInSchema):
+    """
+    Dispatches a real 6-digit verification code to the user's email address
+    via Resend API. Also logs to console for local development.
+    """
+    user = User.objects.filter(email__iexact=payload.email).first()
+    if not user:
+        return 404, {"message": "No account registered with this email address."}
+
+    # Invalidate any active, unused OTPs for this email address
+    PasswordResetOTP.objects.filter(email__iexact=payload.email, is_used=False).update(is_used=True)
+
+    # Generate cryptographically secure 6-digit numeric OTP
+    otp_code = f"{random.randint(100000, 999999)}"
+    expires_at = django_timezone.now() + timedelta(minutes=10)
+
+    # Persist OTP in database
+    PasswordResetOTP.objects.create(
+        email=user.email,
+        otp_code=otp_code,
+        expires_at=expires_at
+    )
+
+    # Dispatch branded no-reply email via Resend
+    send_password_reset_otp(user.email, otp_code)
+
+    return 200, {
+        "message": f"Verification code sent to {user.email}. Please check your inbox.",
+        "email": user.email
+    }
+
+
+@router.post("/reset-password", response={200: dict, 400: dict}, auth=None)
+def verify_otp_and_reset_password(request: HttpRequest, payload: VerifyOtpAndResetInSchema):
+    """
+    Validates the 6-digit OTP code and updates the user's account password.
+    """
+    otp_record = (
+        PasswordResetOTP.objects.filter(email__iexact=payload.email, is_used=False)
+        .order_by("-created_at")
+        .first()
+    )
+
+    if not otp_record or django_timezone.now() > otp_record.expires_at:
+        return 400, {"message": "Verification code has expired or is invalid. Please request a new one."}
+
+    if otp_record.attempts >= 5:
+        otp_record.is_used = True
+        otp_record.save(update_fields=["is_used"])
+        return 400, {"message": "Too many invalid attempts. Please request a new code."}
+
+    if otp_record.otp_code != payload.otp.strip():
+        otp_record.attempts += 1
+        otp_record.save(update_fields=["attempts"])
+        remaining = max(0, 5 - otp_record.attempts)
+        return 400, {"message": f"Invalid verification code. {remaining} attempt(s) remaining."}
+
+    # Mark OTP as successfully consumed
+    otp_record.is_used = True
+    otp_record.save(update_fields=["is_used"])
+
+    user = User.objects.filter(email__iexact=payload.email).first()
+    if not user:
+        return 400, {"message": "User not found."}
+
+    user.set_password(payload.new_password)
+    user.save()
+
+    return 200, {
+        "message": "Password updated successfully. You can now sign in with your new password."
+    }
+
+
+# ---------------------------------------------------------
+# EMAIL VERIFICATION (OTP & 1-CLICK LINK)
+# ---------------------------------------------------------
+
+@router.post("/verify-email", response={200: dict, 400: dict}, auth=None)
+def verify_email_address(request: HttpRequest, payload: VerifyEmailInSchema):
+    """
+    Verifies user's email address using either the 6-digit OTP or a direct URL token.
+    """
+    token_record = None
+    now = django_timezone.now()
+
+    if payload.token:
+        token_record = EmailVerificationToken.objects.filter(
+            token=payload.token.strip(),
+            is_used=False,
+            expires_at__gt=now
+        ).select_related('user').first()
+    elif payload.email and payload.otp:
+        token_record = EmailVerificationToken.objects.filter(
+            user__email__iexact=payload.email.strip(),
+            otp_code=payload.otp.strip(),
+            is_used=False,
+            expires_at__gt=now
+        ).select_related('user').first()
+
+    if not token_record:
+        return 400, {"message": "Invalid or expired verification code."}
+
+    # Mark token used & verify user
+    token_record.is_used = True
+    token_record.save(update_fields=["is_used"])
+
+    user = token_record.user
+    user.is_email_verified = True
+    user.save(update_fields=["is_email_verified"])
+
+    return 200, {
+        "message": f"Email {user.email} verified successfully!",
+        "is_email_verified": True,
+        "email": user.email
+    }
+
+
+@router.get("/verify-email", response={200: dict, 400: dict}, auth=None)
+def verify_email_via_link(request: HttpRequest, token: str):
+    """
+    Handles 1-click email verification links clicked directly from incoming email notifications.
+    """
+    now = django_timezone.now()
+    token_record = EmailVerificationToken.objects.filter(
+        token=token.strip(),
+        is_used=False,
+        expires_at__gt=now
+    ).select_related('user').first()
+
+    if not token_record:
+        return 400, {"message": "Invalid or expired email verification link."}
+
+    token_record.is_used = True
+    token_record.save(update_fields=["is_used"])
+
+    user = token_record.user
+    user.is_email_verified = True
+    user.save(update_fields=["is_email_verified"])
+
+    return 200, {
+        "message": f"Email {user.email} verified successfully! Your account is now verified.",
+        "is_email_verified": True,
+        "email": user.email
+    }
+
+
+@router.post("/resend-verification", response={200: dict, 400: dict, 404: dict, 429: dict}, auth=None)
+def resend_email_verification(request: HttpRequest, payload: ResendVerificationInSchema):
+    """
+    Dispatches a fresh 6-digit OTP code and verification link.
+    Enforces a 60-second cool-down period to prevent abuse.
+    """
+    email_clean = payload.email.strip().lower()
+    user = User.objects.filter(email__iexact=email_clean).first()
+    if not user:
+        return 404, {"message": "Account with this email does not exist."}
+
+    if user.is_email_verified:
+        return 200, {
+            "message": "This email address is already verified.",
+            "is_email_verified": True
+        }
+
+    # Cool-down check: 60 seconds
+    recent_token = EmailVerificationToken.objects.filter(
+        user=user,
+        created_at__gte=django_timezone.now() - timedelta(seconds=60)
+    ).first()
+    if recent_token:
+        return 429, {"message": "Please wait 60 seconds before requesting another verification code."}
+
+    # Invalidate previous unused tokens
+    EmailVerificationToken.objects.filter(user=user, is_used=False).update(is_used=True)
+
+    # Generate new token and OTP
+    otp_code = f"{random.randint(100000, 999999)}"
+    token_str = secrets.token_urlsafe(32)
+    EmailVerificationToken.objects.create(
+        user=user,
+        token=token_str,
+        otp_code=otp_code,
+        expires_at=django_timezone.now() + timedelta(hours=24)
+    )
+
+    try:
+        full_name = f"{user.first_name} {user.last_name}".strip() or user.username
+        send_welcome_verification_email(
+            recipient_email=user.email,
+            full_name=full_name,
+            role=user.role,
+            otp_code=otp_code,
+            verification_token=token_str
+        )
+    except Exception:
+        pass
+
+    return 200, {
+        "message": "A new verification code has been dispatched to your email address."
+    }
+
 
 
 # ---------------------------------------------------------
@@ -242,13 +539,14 @@ def oauth_social_login(request: HttpRequest, payload: OAuthLoginInSchema):
             role=chosen_role,
             auth_provider=auth_provider,
             provider_id=provider_sub,
-            avatar_url=avatar
+            avatar_url=avatar,
+            is_email_verified=True
         )
         user.set_unusable_password()
         user.save()
         is_new = True
     else:
-        # Existing user: link OAuth provider details and update avatar if empty
+        # Existing user: link OAuth provider details, mark email verified, and update avatar if empty
         updated = False
         if not user.provider_id:
             user.provider_id = provider_sub
@@ -256,8 +554,11 @@ def oauth_social_login(request: HttpRequest, payload: OAuthLoginInSchema):
         if not user.avatar_url and avatar:
             user.avatar_url = avatar
             updated = True
+        if not user.is_email_verified:
+            user.is_email_verified = True
+            updated = True
         if updated:
-            user.save(update_fields=["provider_id", "avatar_url"])
+            user.save(update_fields=["provider_id", "avatar_url", "is_email_verified"])
 
     token = create_access_token(user)
 

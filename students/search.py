@@ -359,29 +359,35 @@ def compute_skill_tag_score(
     student_skills_matrix: dict,
     query_skill_tags: List[str],
     inferred_sector: Optional[str],
-    candidate_sectors: Optional[List[str]] = None
+    candidate_sectors: Optional[List[str]] = None,
+    raw_extracted_skills: Optional[List[str]] = None
 ) -> Tuple[float, List[str]]:
     """
     Deterministic Skill-Tag Score (no ML):
-    Score = sum(student skill weight x evidence x sector_factor) over matched tags, normalized.
+    Score is strictly based on whether the candidate possesses the query skills.
+    Candidates with no matching skills receive 0.0.
 
     - Ws: individual skill proficiency weight (0-100)
     - Pe: active project evidence score (0-100)
-    - Sector consistency:
-      - If candidate belongs to the query's inferred domain: 1.25x boost.
-      - If candidate has a cross-domain skill collision (different sector): 0.6x.
-      - Default / unclassified: 1.0x baseline.
-
-    Returns:
-        (normalized_score in [0.0, 1.0], list_of_matched_student_skills)
+    - Sector consistency factor
     """
     if not query_skill_tags:
         return 0.0, []
 
-    if not isinstance(student_skills_matrix, dict) or not student_skills_matrix:
+    candidate_skills_lower = {}
+    if isinstance(student_skills_matrix, dict):
+        candidate_skills_lower = {k.lower().strip(): v for k, v in student_skills_matrix.items()}
+    
+    # Also index raw extracted skills if matrix is not yet computed
+    if raw_extracted_skills and isinstance(raw_extracted_skills, list):
+        for rk in raw_extracted_skills:
+            clean_rk = str(rk).lower().strip()
+            if clean_rk and clean_rk not in candidate_skills_lower:
+                candidate_skills_lower[clean_rk] = {"weight": 60, "project_evidence": 60}
+
+    if not candidate_skills_lower:
         return 0.0, []
 
-    candidate_skills_lower = {k.lower().strip(): v for k, v in student_skills_matrix.items()}
     matched_skills = []
     total_contribution = 0.0
 
@@ -410,21 +416,26 @@ def compute_skill_tag_score(
             matched_skills.append(matched_key)
             skill_info = candidate_skills_lower[matched_key]
             if isinstance(skill_info, dict):
-                ws = float(skill_info.get("weight", 50))
-                pe = float(skill_info.get("project_evidence", 50))
+                ws = float(skill_info.get("weight", 60))
+                pe = float(skill_info.get("project_evidence", 60))
             else:
-                ws = 50.0
-                pe = 50.0
+                ws = 60.0
+                pe = 60.0
 
-            # Weight x Evidence contribution: (Ws / 100) * (Pe / 100) in [0.0, 1.0]
+            # Evidence contribution in [0.0, 1.0]
             skill_val = (ws / 100.0) * (pe / 100.0) * sector_factor
             total_contribution += skill_val
 
-    # Theoretical maximum: all query skills matched with 100 weight and 100 evidence with max boost (1.25)
-    max_possible = len(query_skill_tags) * 1.25
-    normalized_score = min(1.0, total_contribution / max_possible) if max_possible > 0 else 0.0
+    if not matched_skills:
+        return 0.0, []
 
-    return round(normalized_score, 4), matched_skills
+    # Overlap ratio: how many of the query's required skills the candidate possesses
+    overlap_ratio = len(matched_skills) / max(1, len(query_skill_tags))
+    avg_proficiency = min(1.0, total_contribution / max(1, len(matched_skills)))
+    
+    # Skill score combines direct presence (70%) and applied depth (30%)
+    normalized_score = round(min(1.0, (0.70 * overlap_ratio) + (0.30 * avg_proficiency)), 4)
+    return normalized_score, matched_skills
 
 
 # --- 2. DENORMALIZED SEARCH CORPUS BUILDER & INDEXER ---
@@ -701,17 +712,21 @@ def rank_student_profiles(
                 if isinstance(r_data, dict) and "sector" in r_data:
                     cand_sectors.append(r_data["sector"])
 
+        cand_raw_skills = getattr(profile, 'raw_extracted_skills', []) or []
+        cand_skills = list((profile.skills_matrix or {}).keys()) + cand_raw_skills
+        cand_has_skills = len(cand_skills) > 0
+
         # Signal 1: Skill-tag score (deterministic, no ML)
         skill_score, matched_cand_skills = compute_skill_tag_score(
             student_skills_matrix=profile.skills_matrix,
             query_skill_tags=query_skills,
             inferred_sector=inferred_sector,
-            candidate_sectors=cand_sectors
+            candidate_sectors=cand_sectors,
+            raw_extracted_skills=cand_raw_skills
         )
 
         # Signal 2: Semantic score
         if has_pgvector and hasattr(profile, "cosine_dist") and profile.cosine_dist is not None:
-            # CosineDistance = 1 - cosine_similarity
             semantic_score = max(0.0, min(1.0, 1.0 - float(profile.cosine_dist)))
         elif profile.embedding:
             semantic_score = compute_semantic_score(query_embedding, profile.embedding)
@@ -721,35 +736,51 @@ def rank_student_profiles(
 
         # Signal 3: Full-text score
         if has_fulltext and hasattr(profile, "ft_rank") and profile.ft_rank is not None:
-            # SearchRank with normalization=32 yields score in [0.0, 1.0)
             raw_ft = float(profile.ft_rank)
-            fulltext_score = min(1.0, raw_ft * 3.0)  # Scale modest rank up
+            fulltext_score = min(1.0, raw_ft * 3.0)
         else:
             fulltext_score = compute_fulltext_score(profile.search_corpus, query)
         fulltext_score = round(fulltext_score, 4)
 
-        # Base Three-Signal Relevance Fusion
-        relevance_score = fuse_scores(
-            skill_tag_score=skill_score,
-            semantic_score=semantic_score,
-            fulltext_score=fulltext_score,
-            weights=(w_skill, w_semantic, w_fulltext)
-        )
+        # STRICT SKILL-BASED MATCHING GATE:
+        # 1. Candidates with 0 skills get 0 match (no free points).
+        # 2. When query specifies skill tags (e.g. Python), candidates lacking those skills get 0 match.
+        if not cand_has_skills:
+            final = 0.0
+            skill_score = 0.0
+            semantic_score = 0.0
+            fulltext_score = 0.0
+            matched_cand_skills = []
+            total_multiplier = 1.0
+        elif query_skills and len(matched_cand_skills) == 0:
+            final = 0.0
+            skill_score = 0.0
+            semantic_score = 0.0
+            fulltext_score = 0.0
+            total_multiplier = 1.0
+        else:
+            # Base Three-Signal Relevance Fusion (heavily weighted towards skill presence)
+            effective_weights = (0.70, 0.20, 0.10) if query_skills else (w_skill, w_semantic, w_fulltext)
+            relevance_score = fuse_scores(
+                skill_tag_score=skill_score,
+                semantic_score=semantic_score,
+                fulltext_score=fulltext_score,
+                weights=effective_weights
+            )
 
-        # Verification & Cognitive Confidence Multiplier:
-        # Up to +15% for 100% confidence score, +10% for passing verification test
-        conf_ratio = max(0.0, min(1.0, (profile.overall_confidence_score or 0.0) / 100.0))
-        verified_bonus = 0.10 if profile.is_verified else 0.00
-        confidence_boost = 1.0 + (0.15 * conf_ratio) + verified_bonus
+            # Verification & Cognitive Confidence Multiplier:
+            conf_ratio = max(0.0, min(1.0, (profile.overall_confidence_score or 0.0) / 100.0))
+            verified_bonus = 0.10 if profile.is_verified else 0.00
+            confidence_boost = 1.0 + (0.15 * conf_ratio) + verified_bonus
 
-        # Target Role Intent Alignment Bonus:
-        # +5% boost if recruiter query explicitly mentions one of candidate's target roles
+            # Target Role Intent Alignment Bonus:
+            candidate_target_roles = profile.target_roles or []
+            role_intent_bonus = 0.05 if any(tr.lower() in query.lower() for tr in candidate_target_roles) else 0.0
+
+            total_multiplier = round(confidence_boost + role_intent_bonus, 4)
+            final = round(min(1.0, relevance_score * total_multiplier), 4)
+
         candidate_target_roles = profile.target_roles or []
-        role_intent_bonus = 0.05 if any(tr.lower() in query.lower() for tr in candidate_target_roles) else 0.0
-
-        total_multiplier = round(confidence_boost + role_intent_bonus, 4)
-        final = round(relevance_score * total_multiplier, 4)
-
         username_display = f"Candidate #{profile.id}" if blind else profile.user.username
         email_display = "[REDACTED]" if blind else profile.user.email
         institution_display = "[REDACTED]" if (blind and profile.institution) else (profile.institution or None)
@@ -779,15 +810,18 @@ def rank_student_profiles(
         })
 
     # Sort descending by final fused score
-    scored_results.sort(key=lambda x: x["final_score"], reverse=True)
+    # If there are candidates with actual skill matches (>0), prioritize them exclusively
+    matching_candidates = [r for r in scored_results if r["final_score"] > 0.0]
+    results_to_sort = matching_candidates if matching_candidates else scored_results
+    results_to_sort.sort(key=lambda x: x["final_score"], reverse=True)
 
     return {
         "query": query,
         "inferred_sector": inferred_sector,
         "matched_query_skills": query_skills,
         "weights_used": {"skill_tag": w_skill, "semantic": w_semantic, "fulltext": w_fulltext},
-        "total_results": len(scored_results),
+        "total_results": len(results_to_sort),
         "is_blind": blind,
-        "results": scored_results[:limit]
+        "results": results_to_sort[:limit]
     }
 

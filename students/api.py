@@ -78,6 +78,9 @@ def _student_to_out_schema(profile: StudentProfile) -> dict:
         "id": profile.id,
         "username": profile.user.username,
         "email": profile.user.email,
+        "first_name": profile.user.first_name or "",
+        "last_name": profile.user.last_name or "",
+        "avatar_url": getattr(profile.user, 'avatar_url', "") or "",
         "bio": profile.bio or "",
         "current_designation": getattr(profile, 'current_designation', "") or "",
         "experience_years": getattr(profile, 'experience_years', 0.0) or 0.0,
@@ -416,6 +419,27 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
     """
     profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
     
+    # Update linked User model fields if provided
+    user = profile.user
+    user_updated = False
+    if payload.username and payload.username.strip() != user.username:
+        new_username = payload.username.strip()
+        if User.objects.filter(username=new_username).exclude(id=user.id).exists():
+            return 400, {"message": "Username is already taken by another account."}
+        user.username = new_username
+        user_updated = True
+    if payload.first_name is not None and payload.first_name.strip() != (user.first_name or ""):
+        user.first_name = payload.first_name.strip()
+        user_updated = True
+    if payload.last_name is not None and payload.last_name.strip() != (user.last_name or ""):
+        user.last_name = payload.last_name.strip()
+        user_updated = True
+    if payload.avatar_url is not None and payload.avatar_url.strip() != (user.avatar_url or ""):
+        user.avatar_url = payload.avatar_url.strip()
+        user_updated = True
+    if user_updated:
+        user.save()
+
     if payload.bio is not None:
         profile.bio = payload.bio
     if payload.gender is not None:
@@ -481,6 +505,7 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
         ]
         profile.skills_matrix = build_skills_matrix(raw_skills, certs)
         profile.role_fit_matrix = generate_role_fit_matrix(profile.skills_matrix)
+        profile.raw_extracted_skills = list(profile.skills_matrix.keys())
     elif payload.certifications is not None and profile.skills_matrix:
         raw_skills = [
             {
@@ -492,7 +517,11 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
         ]
         profile.skills_matrix = build_skills_matrix(raw_skills, payload.certifications)
         profile.role_fit_matrix = generate_role_fit_matrix(profile.skills_matrix)
+        profile.raw_extracted_skills = list(profile.skills_matrix.keys())
 
+    # Dynamically recompute overall profile strength score
+    p_strength, _ = compute_profile_strength(profile)
+    profile.profile_strength_score = p_strength
     profile.save()
 
     # Re-index search corpus with updated qualifications
@@ -968,7 +997,7 @@ def submit_student_screening_test(request, data: TestSubmissionInSchema = Body(.
 # 4. JOB & INTERNSHIP DISCOVERY FEED
 # ---------------------------------------------------------
 
-@router.get("/jobs/feed", response=JobDiscoveryFeedOut)
+@router.get("/jobs/feed", response=JobDiscoveryFeedOut, auth=None)
 def get_job_discovery_feed(
     request,
     role_type: Optional[str] = None,
@@ -1051,7 +1080,7 @@ def get_job_discovery_feed(
 # 5. NATURAL-LANGUAGE CANDIDATE JOB SEARCH
 # ---------------------------------------------------------
 
-@router.post("/jobs/search", response=CandidateJobSearchResponseOut)
+@router.post("/jobs/search", response=CandidateJobSearchResponseOut, auth=None)
 def search_jobs_post(request, payload: CandidateJobSearchIn):
     """
     Plain-Language Job Search Bar (POST):
@@ -1068,7 +1097,7 @@ def search_jobs_post(request, payload: CandidateJobSearchIn):
     return results
 
 
-@router.get("/jobs/search", response=CandidateJobSearchResponseOut)
+@router.get("/jobs/search", response=CandidateJobSearchResponseOut, auth=None)
 def search_jobs_get(
     request,
     q: str,

@@ -63,6 +63,43 @@ def list_institution_directory(request):
     return results
 
 
+@institutions_router.get("/search", response=List[InstitutionOut])
+def search_institutions(request, q: str = "", limit: int = 25):
+    """
+    Typeahead Search for Colleges & Universities:
+    Fast, debounced lookup matching Indian institutions by name, city, state, or acronym (IIT, NIT, etc.).
+    """
+    query = q.strip()
+    if not query:
+        qs = Institution.objects.filter(is_verified=True).order_by("nirf_rank", "name")[:limit]
+    else:
+        qs = Institution.objects.filter(
+            models.Q(name__icontains=query) |
+            models.Q(city__icontains=query) |
+            models.Q(state__icontains=query) |
+            models.Q(code__icontains=query)
+        ).order_by("nirf_rank", "name")[:limit]
+
+    results = []
+    for inst in qs:
+        results.append(InstitutionOut(
+            id=inst.id,
+            name=inst.name,
+            code=inst.code,
+            institution_type=inst.institution_type,
+            state=inst.state,
+            city=inst.city,
+            website=inst.website,
+            nirf_rank=inst.nirf_rank,
+            is_verified=inst.is_verified,
+            branding_logo_url=inst.branding_logo_url,
+            departments=[],
+            created_at=inst.created_at
+        ))
+    return results
+
+
+
 @institutions_router.post("/", response={201: InstitutionOut, 400: dict}, auth=AcademiaAuth())
 def create_institution(request, payload: InstitutionCreateIn):
     """

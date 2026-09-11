@@ -42,5 +42,48 @@ class User(AbstractUser):
     def is_academia(self) -> bool:
         return self.role == self.Role.ACADEMIA
 
+    is_email_verified = models.BooleanField(
+        default=False,
+        help_text="Designates whether the user has verified their email address"
+    )
+
     class Meta:
         db_table = 'skillsetu_users'
+
+
+class PasswordResetOTP(models.Model):
+    email = models.EmailField(db_index=True)
+    otp_code = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+    attempts = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        db_table = 'skillsetu_password_reset_otps'
+        indexes = [
+            models.Index(fields=['email', 'is_used', 'expires_at']),
+        ]
+
+    def __str__(self):
+        return f"OTP for {self.email} (Used: {self.is_used})"
+
+
+class EmailVerificationToken(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='email_verifications')
+    token = models.CharField(max_length=64, unique=True, db_index=True)
+    otp_code = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = 'skillsetu_email_verification_tokens'
+        indexes = [
+            models.Index(fields=['token', 'is_used', 'expires_at']),
+            models.Index(fields=['user', 'otp_code', 'is_used', 'expires_at']),
+        ]
+
+    def __str__(self):
+        return f"Email Verification for {self.user.email} (Used: {self.is_used})"
+

@@ -173,6 +173,7 @@ def compute_profile_strength(profile) -> tuple:
     Computes candidate profile strength (0-100) using the approved industry standard:
     P_overall = 0.45 * S_cognitive + 0.30 * S_projects_exp + 0.15 * S_certifications + 0.10 * S_academics
     Enriches S_projects_exp with verified GitHub engineering score when available.
+    Brand new profiles with no skills or assessments get default score 0.0.
     Returns (profile_strength_score, breakdown_dict).
     """
     # 1. Cognitive Assessment Score (45%)
@@ -180,11 +181,11 @@ def compute_profile_strength(profile) -> tuple:
     
     # 2. Projects & Applied Experience Score (30%)
     weights = [
-        v.get("weight", 50) 
+        v.get("weight", 0.0) 
         for v in (profile.skills_matrix or {}).values() 
-        if isinstance(v, dict)
+        if isinstance(v, dict) and v.get("weight") is not None
     ]
-    mean_skills_weight = float(sum(weights) / len(weights)) if weights else 40.0
+    mean_skills_weight = float(sum(weights) / len(weights)) if weights else 0.0
 
     # Enrich with GitHub Engineering Production Score if screened
     gh_metrics = getattr(profile, "github_metrics", {}) or {}
@@ -210,15 +211,19 @@ def compute_profile_strength(profile) -> tuple:
     if profile.cgpa is not None:
         s_academics = min(100.0, float(profile.cgpa) * 10.0)
     else:
-        s_academics = 70.0  # campus baseline
+        s_academics = 0.0  # default 0 for unupdated profile
         
-    p_overall = round(
-        (0.45 * s_cognitive) +
-        (0.30 * s_projects_exp) +
-        (0.15 * s_cert) +
-        (0.10 * s_academics),
-        2
-    )
+    # Brand new users with no skills, assessments, certifications, or GPA get default 0.0
+    if not weights and s_cognitive == 0.0 and s_cert == 0.0 and s_academics == 0.0:
+        p_overall = 0.0
+    else:
+        p_overall = round(
+            (0.45 * s_cognitive) +
+            (0.30 * s_projects_exp) +
+            (0.15 * s_cert) +
+            (0.10 * s_academics),
+            2
+        )
     
     breakdown = {
         "cognitive_score": round(s_cognitive, 2),

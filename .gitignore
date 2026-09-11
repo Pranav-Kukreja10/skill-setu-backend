@@ -67,4 +67,6 @@ GEMINI.md
 *.orig
 .pytest_cache/
 .coverage
-htmlcov/
+htmlcov/
+
+SkillSetu

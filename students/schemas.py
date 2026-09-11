@@ -87,6 +87,10 @@ class StudentPreferencesUpdateIn(Schema):
     career_discovery: Optional[Dict[str, Any]] = None
 
 class StudentProfileInSchema(Schema):
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    avatar_url: Optional[str] = None
     bio: Optional[str] = None
     gender: Optional[str] = None
     current_designation: Optional[str] = None
@@ -119,6 +123,9 @@ class StudentProfileOutSchema(Schema):
     id: int
     username: str
     email: str
+    first_name: Optional[str] = ""
+    last_name: Optional[str] = ""
+    avatar_url: Optional[str] = ""
     gender: str = "PREFER_NOT_TO_SAY"
     bio: Optional[str] = None
     current_designation: Optional[str] = ""
