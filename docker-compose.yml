@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: skillsetu_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: skillsetu_db
+      POSTGRES_USER: skillsetu_user
+      POSTGRES_PASSWORD: skillsetu123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skillsetu_user -d skillsetu_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: .
+    container_name: skillsetu_backend
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DEBUG=True
+      - SECRET_KEY=django-insecure-0)m*j8j!5hdlk6f^18pa*3(6zj^s0#!ubg3fp9!!o(tg_$41pr
+      - DB_NAME=skillsetu_db
+      - DB_USER=skillsetu_user
+      - DB_PASSWORD=skillsetu123
+      - DB_HOST=db
+      - DB_PORT=5432
+      - AI_PROVIDER=cloud
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-AQ.Ab8RN6I6j_gU_gYFOrss-mqZI6EnWT4L5-xrr2GUIUgFv4rVeQ}
+      - MODEL_RESUME_PARSER=gemini-3.1-flash-lite
+      - MODEL_TEST_GENERATOR=gemini-3.5-flash-lite
+      - MODEL_GRADER=gemini-3.1-flash-lite
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py seed_benchmarks &&
+             python manage.py seed_data &&
+             python manage.py seed_recruiter_data &&
+             python manage.py seed_institutions &&
+             python manage.py runserver 0.0.0.0:8000"
+
+volumes:
+  postgres_data:
