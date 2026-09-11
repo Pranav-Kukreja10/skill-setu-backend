@@ -18,10 +18,13 @@ from recruiters.schemas import (
     JobApplicationApplyIn, JobApplicationStatusUpdateIn, JobApplicationOut, StudentMyApplicationOut,
     ApplicantStudentOut, InternshipProgressUpdateIn, InternshipMilestoneLogIn,
     LearningProgramOut, LearningProgramCreateIn,
+    LearningProgressUpdateIn, LearningProgressUpdateOut,
+    LearningProgramRecommendationItem, LearningRecommendationsResponseOut,
     PlacementOverviewOut, BranchWiseReportOut, BranchPlacementStatOut,
     StudentRosterReportOut, StudentPlacementStatusOut, StudentOfferDetail,
     SkillDeficitItemOut, SkillGapAnalysisOut, InDemandSkillItemOut, InDemandSkillsOut, PlacementTrendsOut
 )
+from students.recommendations import compute_skill_gap_roadmap
 from recruiters.search import index_job_listing, rank_job_listings, compute_job_skill_overlap
 
 # ---------------------------------------------------------
@@ -54,17 +57,37 @@ def get_my_recruiter_profile(request):
             created_at=c.created_at
         )
 
+    comp_id = recruiter.company_id
+    active_jobs = JobListing.objects.filter(company_id=comp_id, status=JobListing.ListingStatus.PUBLISHED).count() if comp_id else 0
+    shortlisted = JobApplication.objects.filter(listing__company_id=comp_id, status=JobApplication.ApplicationStatus.SHORTLISTED).count() if comp_id else 0
+    interviews = JobApplication.objects.filter(listing__company_id=comp_id, status=JobApplication.ApplicationStatus.INTERVIEW).count() if comp_id else 0
+    total_apps = JobApplication.objects.filter(listing__company_id=comp_id).count() if comp_id else 0
+    verified_apps = JobApplication.objects.filter(listing__company_id=comp_id, student__is_verified=True).count() if comp_id else 0
+    pass_rate = round((verified_apps / total_apps * 100), 1) if total_apps > 0 else 85.0
+
+    metrics_dict = {
+        "active_listings_count": active_jobs,
+        "shortlisted_talent_count": shortlisted,
+        "interviews_scheduled_count": interviews,
+        "total_applicants_count": total_apps,
+        "verification_pass_rate": pass_rate,
+    }
+
     return 200, RecruiterProfileOut(
         id=recruiter.id,
         user_id=request.auth.id,
         username=request.auth.username,
         email=request.auth.email,
+        first_name=getattr(request.auth, 'first_name', '') or '',
+        last_name=getattr(request.auth, 'last_name', '') or '',
+        avatar_url=getattr(request.auth, 'avatar_url', None),
         designation=recruiter.designation,
         department=recruiter.department,
         contact_phone=recruiter.contact_phone,
         is_company_admin=recruiter.is_company_admin,
         company=comp_out,
-        preferences=recruiter.get_preferences()
+        preferences=recruiter.get_preferences(),
+        metrics=metrics_dict
     )
 
 @recruiters_router.put("/me", response={200: RecruiterProfileOut, 400: dict})
@@ -883,13 +906,114 @@ def update_internship_progress(request, application_id: int, payload: Internship
 # ---------------------------------------------------------
 programs_router = Router(tags=["Industry Learning Programs & Collaboration"])
 
-def _program_to_schema(program: LearningProgram) -> LearningProgramOut:
+def _resolve_request_user(request):
+    user = getattr(request, 'auth', None)
+    if user:
+        return user
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+        try:
+            import jwt
+            from django.conf import settings
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+            return User.objects.filter(id=payload.get("user_id")).first()
+        except Exception:
+            pass
+    return None
+
+def _parse_program_meta(program: LearningProgram, student_profile: Optional[StudentProfile] = None):
+    text = program.description or ""
+    modules = []
+    if "Modules:" in text:
+        parts = text.split("Modules:")[1].strip().split("\n")
+        for p in parts:
+            clean_p = p.strip()
+            if clean_p and (clean_p[0].isdigit() or clean_p.startswith("-")):
+                dot_idx = clean_p.find(".")
+                if dot_idx != -1 and dot_idx < 4:
+                    clean_p = clean_p[dot_idx + 1:].strip()
+                elif clean_p.startswith("-"):
+                    clean_p = clean_p[1:].strip()
+                if clean_p:
+                    modules.append(clean_p)
+    if not modules:
+        skills = program.skills_covered or []
+        for i, s in enumerate(skills[:5], 1):
+            modules.append(f"Module {i}: Advanced Applied {s}")
+        if not modules:
+            modules = [
+                "Module 1: Foundations & Architecture",
+                "Module 2: Core Practical Workflows",
+                "Module 3: Advanced Implementation",
+                "Module 4: Industry Capstone Project"
+            ]
+
+    skills_lower = [s.lower().strip() for s in (program.skills_covered or [])]
+    if any(s in skills_lower for s in ['figma', 'ui/ux design', 'ui/ux', 'ui design', 'ux design', 'wireframing', 'design systems', 'wcag accessibility', 'prototyping', 'motion design', 'interaction design']):
+        domain = "Design & Creative Arts"
+    elif any(s in skills_lower for s in ['business analysis', 'bpmn workflows', 'market research', 'agile & scrum', 'project management', 'supply chain', 'operations management', 'crm systems', 'salesforce']):
+        domain = "Business & Management"
+    elif any(s in skills_lower for s in ['tally prime', 'gst compliance', 'statutory auditing', 'taxation', 'tds', 'financial modeling', 'dcf valuation', 'financial reporting', 'cost accounting', 'quantitative analysis']):
+        domain = "Commerce & Finance"
+    elif program.company and program.company.industry:
+        ind_name = program.company.industry.name
+        if ind_name == "Design & Creative Arts":
+            domain = "Design & Creative Arts"
+        elif ind_name in ["Commerce & Accounting", "Finance & Banking"]:
+            domain = "Commerce & Finance"
+        elif ind_name == "Business & Management":
+            domain = "Business & Management"
+        else:
+            domain = "Engineering & Tech"
+    else:
+        domain = "Engineering & Tech"
+
+    prog_type_str = str(program.program_type).upper()
+    if "CERTIFICATION" in prog_type_str or "FELLOWSHIP" in program.title.upper():
+        level = "Advanced"
+    elif "WORKSHOP" in prog_type_str:
+        level = "Intermediate"
+    elif "TRAINING" in prog_type_str:
+        level = "Beginner to Intermediate"
+    else:
+        level = "Intermediate"
+
+    rating = round(4.7 + (program.id % 4) * 0.08, 1)
+
+    is_enrolled = False
+    user_progress = 0
+    completed_modules = []
+    if student_profile:
+        if program.enrolled_students.filter(id=student_profile.id).exists():
+            is_enrolled = True
+        pref = student_profile.preferences or {}
+        course_prog = pref.get("course_progress", {}).get(str(program.id), {})
+        if course_prog:
+            is_enrolled = True
+            user_progress = int(course_prog.get("progress", 0))
+            completed_modules = course_prog.get("completed_modules", [])
+
+    return {
+        "domain": domain,
+        "modules": modules,
+        "level": level,
+        "rating": rating,
+        "is_enrolled": is_enrolled,
+        "user_progress": user_progress,
+        "completed_modules": completed_modules
+    }
+
+def _program_to_schema(program: LearningProgram, student_profile: Optional[StudentProfile] = None) -> LearningProgramOut:
     s_count = getattr(program, 'enrolled_students_count', None)
     if s_count is None:
         s_count = program.enrolled_students.count()
     f_count = getattr(program, 'enrolled_faculty_count', None)
     if f_count is None:
         f_count = program.enrolled_faculty.count()
+
+    meta = _parse_program_meta(program, student_profile)
+
     return LearningProgramOut(
         id=program.id,
         company_id=program.company.id,
@@ -909,7 +1033,13 @@ def _program_to_schema(program: LearningProgram) -> LearningProgramOut:
         branding_banner_url=program.branding_banner_url or "",
         enrolled_students_count=s_count,
         enrolled_faculty_count=f_count,
-        created_at=program.created_at
+        created_at=program.created_at,
+        domain=meta["domain"],
+        modules=meta["modules"],
+        rating=meta["rating"],
+        level=meta["level"],
+        is_enrolled=meta["is_enrolled"],
+        user_progress=meta["user_progress"]
     )
 
 @programs_router.get("/", response=List[LearningProgramOut])
@@ -917,23 +1047,24 @@ def list_learning_programs(
     request,
     program_type: Optional[str] = None,
     target_audience: Optional[str] = None,
+    domain: Optional[str] = None,
     mode: Optional[str] = None,
     q: Optional[str] = None
 ):
-    """
-    Industry Learning Programs Feed (PS Requirement):
-    Browse corporate training programs, certification tracks, hands-on workshops,
-    mentorship initiatives, and innovation challenges/hackathons.
-    """
+    user = _resolve_request_user(request)
+    student_profile = None
+    if user and user.role in [User.Role.STUDENT, User.Role.CANDIDATE]:
+        student_profile = StudentProfile.objects.filter(user=user).first()
+
     qs = LearningProgram.objects.select_related('company').annotate(
         enrolled_students_count=models.Count('enrolled_students', distinct=True),
         enrolled_faculty_count=models.Count('enrolled_faculty', distinct=True)
     )
-    if program_type:
+    if program_type and program_type != "ALL":
         qs = qs.filter(program_type__iexact=program_type)
     if target_audience and target_audience != 'ALL':
         qs = qs.filter(models.Q(target_audience__iexact=target_audience) | models.Q(target_audience='ALL'))
-    if mode:
+    if mode and mode != "ALL":
         qs = qs.filter(mode__iexact=mode)
     if q:
         qs = qs.filter(
@@ -941,14 +1072,145 @@ def list_learning_programs(
             models.Q(description__icontains=q) |
             models.Q(company__name__icontains=q)
         )
-    return [_program_to_schema(p) for p in qs]
+
+    results = [_program_to_schema(p, student_profile) for p in qs]
+    if domain and domain != "All":
+        results = [p for p in results if p.domain.lower() == domain.lower() or domain.lower() in p.domain.lower()]
+
+    return results
+
+@programs_router.get("/recommendations", response=LearningRecommendationsResponseOut)
+def get_learning_recommendations(request):
+    user = _resolve_request_user(request)
+    student_profile = None
+    if user and user.role in [User.Role.STUDENT, User.Role.CANDIDATE]:
+        student_profile = StudentProfile.objects.filter(user=user).first()
+
+    all_db_programs = list(LearningProgram.objects.select_related('company').annotate(
+        enrolled_students_count=models.Count('enrolled_students', distinct=True),
+        enrolled_faculty_count=models.Count('enrolled_faculty', distinct=True)
+    ).order_by('-created_at'))
+
+    c_skills_lower = set()
+    target_role = "General Engineering & Tech"
+    top_gap_skills = []
+
+    if student_profile:
+        if student_profile.target_roles and len(student_profile.target_roles) > 0:
+            target_role = student_profile.target_roles[0]
+        elif student_profile.role_fit_matrix:
+            sorted_fits = sorted(
+                student_profile.role_fit_matrix.items(),
+                key=lambda item: float(item[1].get("score", 0) if isinstance(item[1], dict) else 0),
+                reverse=True
+            )
+            if sorted_fits:
+                target_role = sorted_fits[0][0]
+
+        c_matrix = student_profile.skills_matrix or {}
+        for k in c_matrix.keys():
+            c_skills_lower.add(k.lower().strip())
+        for cat_list in (student_profile.skills_categorized or {}).values():
+            if isinstance(cat_list, list):
+                for sk in cat_list:
+                    c_skills_lower.add(sk.lower().strip())
+
+        try:
+            roadmap = compute_skill_gap_roadmap(student_profile)
+            for item in roadmap.get("skills_to_build_next", []):
+                top_gap_skills.append(item.get("skill", "").strip())
+        except Exception:
+            pass
+
+    top_gap_skills_lower = [s.lower() for s in top_gap_skills]
+
+    scored_items = []
+    for prog in all_db_programs:
+        meta = _parse_program_meta(prog, student_profile)
+        p_schema = _program_to_schema(prog, student_profile)
+
+        prog_skills = [s.lower().strip() for s in (prog.skills_covered or [])]
+        matched_skills = [s.title() for s in prog_skills if s in c_skills_lower]
+        gap_skills_covered = [s.title() for s in prog_skills if any(gs in s or s in gs for gs in top_gap_skills_lower)]
+
+        is_gap_booster = len(gap_skills_covered) > 0
+
+        base_score = 65
+        gap_bonus = len(gap_skills_covered) * 12
+        verified_bonus = len(matched_skills) * 8
+        cert_bonus = 6 if prog.is_certified else 0
+        match_score = min(99, max(50, base_score + gap_bonus + verified_bonus + cert_bonus))
+
+        expected_boost = ""
+        recommendation_reason = ""
+        if is_gap_booster:
+            expected_boost = f"+{min(28, len(gap_skills_covered) * 9 + 10)}% Match Boost"
+            recommendation_reason = f"Directly closes {len(gap_skills_covered)} critical skill gaps ({', '.join(gap_skills_covered[:2])}) for {target_role} roles."
+        elif matched_skills:
+            expected_boost = "+12% Proficiency Boost"
+            recommendation_reason = f"Deepens applied proficiency in {', '.join(matched_skills[:2])} with recognized industry certification."
+        else:
+            expected_boost = "+8% Career Breadth"
+            recommendation_reason = f"Broadens foundational competence in {prog.title} with verified credentials."
+
+        scored_items.append(LearningProgramRecommendationItem(
+            program=p_schema,
+            match_score=match_score,
+            matched_skills=matched_skills,
+            gap_skills_covered=gap_skills_covered,
+            expected_boost=expected_boost,
+            is_gap_booster=is_gap_booster,
+            is_enrolled=meta["is_enrolled"],
+            user_progress=meta["user_progress"],
+            completed_modules=meta["completed_modules"],
+            recommendation_reason=recommendation_reason
+        ))
+
+    recommended_programs = sorted(scored_items, key=lambda x: x.match_score, reverse=True)[:8]
+    skill_gap_boosters = [x for x in scored_items if x.is_gap_booster][:6]
+    enrolled_programs = [x for x in scored_items if x.is_enrolled]
+
+    return LearningRecommendationsResponseOut(
+        recommended_programs=recommended_programs,
+        skill_gap_boosters=skill_gap_boosters,
+        enrolled_programs=enrolled_programs,
+        all_programs=scored_items,
+        target_role=target_role,
+        verified_skills_count=len(c_skills_lower),
+        top_gap_skills=top_gap_skills[:6]
+    )
+
+@programs_router.get("/my-enrollments", response=List[LearningProgramRecommendationItem], auth=JWTAuth())
+def get_my_enrollments(request):
+    user = request.auth
+    student_profile = None
+    if user.role in [User.Role.STUDENT, User.Role.CANDIDATE]:
+        student_profile = StudentProfile.objects.filter(user=user).first()
+    
+    if not student_profile:
+        return []
+
+    programs = student_profile.enrolled_learning_programs.select_related('company').all()
+    results = []
+    for prog in programs:
+        meta = _parse_program_meta(prog, student_profile)
+        p_schema = _program_to_schema(prog, student_profile)
+        results.append(LearningProgramRecommendationItem(
+            program=p_schema,
+            match_score=95,
+            matched_skills=prog.skills_covered or [],
+            gap_skills_covered=[],
+            expected_boost="+15% Active Upskill",
+            is_gap_booster=False,
+            is_enrolled=True,
+            user_progress=meta["user_progress"],
+            completed_modules=meta["completed_modules"],
+            recommendation_reason=f"Currently enrolled course track by {prog.company.name}."
+        ))
+    return results
 
 @programs_router.post("/", response={201: LearningProgramOut, 400: dict}, auth=RecruiterAuth())
 def create_learning_program(request, payload: LearningProgramCreateIn):
-    """
-    Publish an Industry Learning Program, Workshop, or Innovation Challenge:
-    Restricted to authenticated corporate recruiters.
-    """
     recruiter = RecruiterProfile.objects.filter(user=request.auth).first()
     if not recruiter or not recruiter.company:
         return 400, {"message": "You must register or join a company before publishing learning programs."}
@@ -972,31 +1234,45 @@ def create_learning_program(request, payload: LearningProgramCreateIn):
 
 @programs_router.get("/{program_id}", response={200: LearningProgramOut, 404: dict})
 def get_learning_program_detail(request, program_id: int):
-    """Fetch detailed information for a specific learning program or workshop."""
+    user = _resolve_request_user(request)
+    student_profile = None
+    if user and user.role in [User.Role.STUDENT, User.Role.CANDIDATE]:
+        student_profile = StudentProfile.objects.filter(user=user).first()
+
     program = LearningProgram.objects.select_related('company').annotate(
         enrolled_students_count=models.Count('enrolled_students', distinct=True),
         enrolled_faculty_count=models.Count('enrolled_faculty', distinct=True)
     ).filter(id=program_id).first()
     if not program:
         return 404, {"message": "Learning program not found."}
-    return 200, _program_to_schema(program)
+    return 200, _program_to_schema(program, student_profile)
 
 @programs_router.post("/{program_id}/enroll", response={200: dict, 400: dict, 404: dict}, auth=JWTAuth())
 def enroll_in_learning_program(request, program_id: int):
-    """
-    1-Click Enrollment in Industry Learning Program or Workshop:
-    Accessible to both Students/Candidates and Faculty/Academicians.
-    """
     user = request.auth
     program = LearningProgram.objects.select_related('company').filter(id=program_id).first()
     if not program:
         return 404, {"message": "Learning program not found."}
 
     from institutions.models import FacultyProfile
+    role_label = "Student"
     if user.role in [User.Role.STUDENT, User.Role.CANDIDATE]:
         student_profile, _ = StudentProfile.objects.get_or_create(user=user)
         program.enrolled_students.add(student_profile)
-        role_label = "Student"
+        
+        pref = student_profile.preferences or {}
+        if "course_progress" not in pref:
+            pref["course_progress"] = {}
+        prog_key = str(program.id)
+        if prog_key not in pref["course_progress"]:
+            pref["course_progress"][prog_key] = {
+                "progress": 0,
+                "completed_modules": [],
+                "enrolled_at": str(timezone.now()),
+                "is_completed": False
+            }
+            student_profile.preferences = pref
+            student_profile.save(update_fields=["preferences"])
     elif user.role in [User.Role.ACADEMIA, User.Role.FACULTY]:
         faculty_profile, _ = FacultyProfile.objects.get_or_create(user=user)
         program.enrolled_faculty.add(faculty_profile)
@@ -1007,7 +1283,7 @@ def enroll_in_learning_program(request, program_id: int):
     Notification.objects.create(
         user=user,
         title=f"Enrolled in {program.title}",
-        message=f"You have successfully enrolled in '{program.title}' offered by {program.company.name}. Program mode: {program.mode}.",
+        message=f"You have successfully enrolled in '{program.title}' offered by {program.company.name}. Mode: {program.mode}.",
         notification_type=Notification.NotificationType.NEW_OPPORTUNITY
     )
 
@@ -1016,6 +1292,68 @@ def enroll_in_learning_program(request, program_id: int):
         "message": f"Successfully enrolled {user.username} in {program.title}.",
         "program_id": program.id,
         "enrolled_as": role_label
+    }
+
+@programs_router.post("/{program_id}/progress", response={200: LearningProgressUpdateOut, 400: dict, 404: dict}, auth=JWTAuth())
+def update_learning_progress(request, program_id: int, payload: LearningProgressUpdateIn):
+    user = request.auth
+    program = LearningProgram.objects.select_related('company').filter(id=program_id).first()
+    if not program:
+        return 404, {"message": "Learning program not found."}
+
+    if user.role not in [User.Role.STUDENT, User.Role.CANDIDATE]:
+        return 400, {"message": "Only students and candidates can record learning progress."}
+
+    student_profile, _ = StudentProfile.objects.get_or_create(user=user)
+    program.enrolled_students.add(student_profile)
+
+    preferences = student_profile.preferences or {}
+    if "course_progress" not in preferences:
+        preferences["course_progress"] = {}
+
+    prog_key = str(program.id)
+    is_completed = payload.is_completed or (payload.progress_percentage >= 100)
+    progress_val = 100 if is_completed else max(0, min(100, payload.progress_percentage))
+
+    cert_id = None
+    if is_completed:
+        cert_id = f"SKL-CERT-{program.id}-{student_profile.id}-{hex(program.id * 1000 + student_profile.id)[2:].upper()}"
+        certs = list(student_profile.certifications or [])
+        cert_title = f"{program.title} Professional Certificate"
+        if not any(c.get("name") == cert_title for c in certs):
+            certs.append({
+                "name": cert_title,
+                "issuer": program.company.name,
+                "issue_year": timezone.now().year,
+                "credential_url": f"https://skillsetu.in/credentials/{cert_id}",
+                "skills_covered": program.skills_covered or []
+            })
+            student_profile.certifications = certs
+
+            Notification.objects.create(
+                user=user,
+                title=f"Verified Certificate Awarded: {program.title}",
+                message=f"Congratulations! You completed '{program.title}' offered by {program.company.name}. Credential ID: {cert_id}.",
+                notification_type=Notification.NotificationType.ASSESSMENT_REMINDER
+            )
+
+    preferences["course_progress"][prog_key] = {
+        "progress": progress_val,
+        "completed_modules": payload.completed_modules,
+        "is_completed": is_completed,
+        "certificate_id": cert_id,
+        "updated_at": str(timezone.now())
+    }
+    student_profile.preferences = preferences
+    student_profile.save(update_fields=["preferences", "certifications"])
+
+    return 200, {
+        "program_id": program.id,
+        "progress_percentage": progress_val,
+        "completed_modules": payload.completed_modules,
+        "is_completed": is_completed,
+        "certificate_id": cert_id,
+        "message": f"Successfully updated progress to {progress_val}%" + (f". Credential #{cert_id} awarded!" if cert_id else ".")
     }
 
 

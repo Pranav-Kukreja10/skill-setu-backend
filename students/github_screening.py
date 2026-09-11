@@ -289,6 +289,108 @@ def evaluate_repo_relevance(repo_data: Dict[str, Any], total_commits: int = 0) -
     }
 
 
+def inspect_repo_raw_fallback(owner: str, repo_name: str) -> Optional[Dict[str, Any]]:
+    session = requests.Session()
+    for branch in ["main", "master"]:
+        readme_url = f"https://raw.githubusercontent.com/{owner}/{repo_name}/{branch}/README.md"
+        try:
+            r = session.get(readme_url, timeout=5)
+            if r.status_code == 200:
+                text = r.text
+                
+                is_chrome_ext = False
+                try:
+                    m_resp = session.get(f"https://raw.githubusercontent.com/{owner}/{repo_name}/{branch}/manifest.json", timeout=3)
+                    if m_resp.status_code == 200:
+                        is_chrome_ext = True
+                except Exception:
+                    pass
+
+                is_node_js = False
+                try:
+                    pkg_resp = session.get(f"https://raw.githubusercontent.com/{owner}/{repo_name}/{branch}/package.json", timeout=3)
+                    if pkg_resp.status_code == 200:
+                        is_node_js = True
+                except Exception:
+                    pass
+
+                is_python = False
+                try:
+                    py_resp = session.get(f"https://raw.githubusercontent.com/{owner}/{repo_name}/{branch}/requirements.txt", timeout=3)
+                    if py_resp.status_code == 200:
+                        is_python = True
+                except Exception:
+                    pass
+
+                has_docker = False
+                try:
+                    dock_resp = session.get(f"https://raw.githubusercontent.com/{owner}/{repo_name}/{branch}/Dockerfile", timeout=3)
+                    has_docker = dock_resp.status_code == 200
+                except Exception:
+                    pass
+
+                has_ci = False
+                try:
+                    ci_resp = session.get(f"https://raw.githubusercontent.com/{owner}/{repo_name}/{branch}/.github/workflows/ci.yml", timeout=3)
+                    has_ci = ci_resp.status_code == 200
+                except Exception:
+                    pass
+
+                detected_langs = []
+                if is_chrome_ext:
+                    detected_langs.extend(["JavaScript", "HTML5", "CSS3", "Chrome Extension API"])
+                elif is_node_js:
+                    detected_langs.extend(["JavaScript", "Node.js"])
+                elif is_python:
+                    detected_langs.append("Python")
+
+                text_lower = text.lower()
+                for tech, tech_label in [
+                    ("react", "React"), ("typescript", "TypeScript"), ("vue", "Vue.js"),
+                    ("next.js", "Next.js"), ("nextjs", "Next.js"), ("tailwind", "Tailwind CSS"),
+                    ("fastapi", "FastAPI"), ("django", "Django"), ("flask", "Flask"),
+                    ("express", "Express.js"), ("postgresql", "PostgreSQL"), ("mongodb", "MongoDB")
+                ]:
+                    if tech in text_lower and tech_label not in detected_langs:
+                        detected_langs.append(tech_label)
+
+                if not detected_langs:
+                    detected_langs = ["JavaScript", "HTML5", "CSS3"]
+
+                desc = ""
+                for line in text.split("\n"):
+                    sline = line.strip()
+                    if sline and not sline.startswith("#") and not sline.startswith("!") and not sline.startswith("["):
+                        desc = sline.replace("**", "").replace("*", "")
+                        break
+
+                if not desc:
+                    desc = f"Verified repository ({repo_name})."
+
+                return {
+                    "name": repo_name,
+                    "description": desc[:250],
+                    "stars": 5,
+                    "forks": 1,
+                    "languages": detected_langs,
+                    "has_ci_cd": has_ci,
+                    "has_docker": has_docker,
+                    "has_tests": "test" in text_lower or "jest" in text_lower or "pytest" in text_lower,
+                    "has_linter": "eslint" in text_lower,
+                    "has_readme": True,
+                    "relevance_tier": "SHOWCASE",
+                    "is_academic": False,
+                    "is_dormant": False,
+                    "is_eligible_for_viva": True,
+                    "is_selected_for_test": True,
+                    "relevance_reason": "Candidate showcase project verified from actual repository files.",
+                    "html_url": f"https://github.com/{owner}/{repo_name}"
+                }
+        except Exception:
+            continue
+    return None
+
+
 def get_mock_github_screening(
     username: str, 
     selected_repos: Optional[List[str]] = None,
@@ -317,35 +419,31 @@ def get_mock_github_screening(
             specified_names.append(rname)
 
     if specified_names:
-        # Generate showcase repositories dynamically for all candidate-chosen repos (supports infinite repos)
         top_repos = []
-        languages_pool = [
-            ["Python", "Docker", "Shell"],
-            ["TypeScript", "React", "PostgreSQL"],
-            ["Go", "Docker", "gRPC"],
-            ["Java", "Spring Boot", "Kafka"],
-            ["Rust", "WebAssembly"]
-        ]
         for idx, rname in enumerate(specified_names):
-            langs = languages_pool[idx % len(languages_pool)]
+            real_data = inspect_repo_raw_fallback(clean_user, rname)
+            if real_data:
+                top_repos.append(real_data)
+                continue
+
             is_academic = bool(ACADEMIC_TOY_REGEX.search(rname))
             top_repos.append({
                 "name": rname,
-                "description": f"Academic lab assignment ({rname})." if is_academic else f"Verified showcase production codebase ({rname}) with modular architecture and CI/CD pipelines.",
-                "stars": 0 if is_academic else (15 + idx * 2),
-                "forks": 0 if is_academic else (3 + idx),
-                "languages": ["C++"] if is_academic else langs,
-                "has_ci_cd": not is_academic,
-                "has_docker": not is_academic,
-                "has_tests": not is_academic,
-                "has_linter": not is_academic,
+                "description": f"Academic lab assignment ({rname})." if is_academic else f"Showcase codebase ({rname}).",
+                "stars": 0 if is_academic else (5 + idx),
+                "forks": 0 if is_academic else 1,
+                "languages": ["C++"] if is_academic else ["JavaScript", "HTML5", "CSS3"],
+                "has_ci_cd": False,
+                "has_docker": False,
+                "has_tests": False,
+                "has_linter": False,
                 "has_readme": True,
                 "relevance_tier": "ACADEMIC_LAB" if is_academic else "SHOWCASE",
                 "is_academic": is_academic,
                 "is_dormant": False,
                 "is_eligible_for_viva": not is_academic,
                 "is_selected_for_test": True,
-                "relevance_reason": "Academic lab assignment (excluded from technical viva for fairness)." if is_academic else "Candidate-specified showcase project evaluated for production engineering signals.",
+                "relevance_reason": "Candidate showcase project.",
                 "html_url": f"https://github.com/{clean_user}/{rname}"
             })
     else:
@@ -577,7 +675,11 @@ def screen_github_profile(
                         raw_repos.append(r_resp.json())
                     elif r_resp.status_code == 403:
                         logger.warning("GitHub rate limit hit while fetching repo %s/%s", owner, repo_name)
-                        return get_mock_github_screening(handle, selected_repos=selected_repos, repo_urls=repo_urls)
+                        real_data = inspect_repo_raw_fallback(owner or handle, repo_name)
+                        if real_data:
+                            raw_repos.append(real_data)
+                        else:
+                            return get_mock_github_screening(handle, selected_repos=selected_repos, repo_urls=repo_urls)
                     else:
                         logger.warning("Repository %s/%s returned status %d", owner, repo_name, r_resp.status_code)
                 except Exception as ex:

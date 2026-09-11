@@ -6,7 +6,8 @@ import jwt
 from datetime import datetime, timedelta, timezone
 from django.conf import settings
 from django.utils import timezone as django_timezone
-from ninja import Router
+from ninja import Router, File
+from ninja.files import UploadedFile
 from django.contrib.auth import authenticate
 from django.http import HttpRequest
 from accounts.models import User, PasswordResetOTP, EmailVerificationToken
@@ -159,6 +160,72 @@ def update_current_user_profile(request: HttpRequest, payload: UserProfileUpdate
 
     user.save()
     return 200, user
+
+
+@router.post("/avatar", response={200: dict, 400: dict}, auth=JWTAuth())
+def upload_avatar(request: HttpRequest, file: UploadedFile = File(...)):
+    user = request.auth
+    allowed_extensions = ('.jpg', '.jpeg', '.png', '.webp')
+    name_lower = (file.name or "").lower()
+    if not name_lower.endswith(allowed_extensions):
+        return 400, {"message": "Invalid file format. Supported formats: JPEG, PNG, WebP."}
+    
+    if file.size and file.size > 5 * 1024 * 1024:
+        return 400, {"message": "File exceeds maximum size limit of 5MB."}
+    
+    ext = os.path.splitext(file.name)[1].lower()
+    avatars_dir = os.path.join(str(settings.MEDIA_ROOT), 'avatars')
+    os.makedirs(avatars_dir, exist_ok=True)
+    
+    if user.avatar_url and user.avatar_url.startswith('/media/avatars/'):
+        old_file = os.path.basename(user.avatar_url)
+        old_path = os.path.join(avatars_dir, old_file)
+        if os.path.isfile(old_path):
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+                
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    new_filename = f"user_{user.id}_{timestamp}{ext}"
+    target_path = os.path.join(avatars_dir, new_filename)
+    
+    try:
+        with open(target_path, 'wb+') as destination:
+            for chunk in file.chunks():
+                destination.write(chunk)
+    except Exception as e:
+        return 400, {"message": f"Failed to save avatar image: {str(e)}"}
+        
+    user.avatar_url = f"/media/avatars/{new_filename}"
+    user.save(update_fields=['avatar_url'])
+    
+    return 200, {
+        "message": "Profile picture updated successfully.",
+        "avatar_url": user.avatar_url
+    }
+
+
+@router.delete("/avatar", response={200: dict}, auth=JWTAuth())
+def remove_avatar(request: HttpRequest):
+    user = request.auth
+    if user.avatar_url and user.avatar_url.startswith('/media/avatars/'):
+        avatars_dir = os.path.join(str(settings.MEDIA_ROOT), 'avatars')
+        old_file = os.path.basename(user.avatar_url)
+        old_path = os.path.join(avatars_dir, old_file)
+        if os.path.isfile(old_path):
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+                
+    user.avatar_url = None
+    user.save(update_fields=['avatar_url'])
+    return 200, {
+        "message": "Profile picture removed successfully.",
+        "avatar_url": None
+    }
+
 
 
 # ---------------------------------------------------------

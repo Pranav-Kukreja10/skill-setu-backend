@@ -68,7 +68,7 @@ class ResilientGrader:
                         multiplier = 1.0 - 0.3 * ((time_taken - 15) / 45)
                     
                     score = int(100 * multiplier)
-                    feedback_msg = f"Correct answer! Answered in {time_taken}s (Speed Multiplier: {multiplier:.2f}x)."
+                    feedback_msg = f"Correct answer! Answered in {time_taken}s."
                 else:
                     score = 0
                     feedback_msg = "Incorrect answer."

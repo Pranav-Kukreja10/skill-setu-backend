@@ -40,21 +40,24 @@ _EMBEDDING_MODEL = None
 
 
 def get_embedding_model():
-    """
-    Singleton loader for BAAI/bge-small-en-v1.5.
-    Loaded once as a module-level object. Sub-15ms CPU/GPU inference.
-    """
     global _EMBEDDING_MODEL
     if _EMBEDDING_MODEL is None:
         try:
+            import os
+            os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
             from sentence_transformers import SentenceTransformer
-            # Load BAAI/bge-small-en-v1.5 (384 dims, retrieval-tuned)
-            _EMBEDDING_MODEL = SentenceTransformer("BAAI/bge-small-en-v1.5")
+            try:
+                _EMBEDDING_MODEL = SentenceTransformer("BAAI/bge-small-en-v1.5", local_files_only=True)
+            except Exception:
+                hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
+                _EMBEDDING_MODEL = SentenceTransformer("BAAI/bge-small-en-v1.5", token=hf_token)
             logger.info("Successfully loaded BAAI/bge-small-en-v1.5 singleton model.")
         except Exception as e:
             logger.error(f"Failed to load SentenceTransformer model: {e}")
             raise
     return _EMBEDDING_MODEL
+
 
 
 def generate_embedding(text: str, is_query: bool = False) -> List[float]:

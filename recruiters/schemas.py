@@ -82,12 +82,16 @@ class RecruiterProfileOut(Schema):
     user_id: int
     username: str
     email: str
+    first_name: Optional[str] = ""
+    last_name: Optional[str] = ""
+    avatar_url: Optional[str] = None
     designation: str
     department: Optional[str] = ""
     contact_phone: Optional[str] = ""
     is_company_admin: bool
     company: Optional[CompanyOut] = None
     preferences: Optional[Dict[str, Any]] = None
+    metrics: Optional[Dict[str, Any]] = None
 
 # --- JOB LISTING SCHEMAS ---
 
@@ -322,6 +326,12 @@ class LearningProgramOut(Schema):
     enrolled_students_count: int = 0
     enrolled_faculty_count: int = 0
     created_at: datetime
+    domain: Optional[str] = "Engineering & Tech"
+    modules: Optional[List[str]] = []
+    rating: Optional[float] = 4.8
+    level: Optional[str] = "Intermediate"
+    is_enrolled: Optional[bool] = False
+    user_progress: Optional[int] = 0
 
 class LearningProgramCreateIn(Schema):
     title: str
@@ -336,6 +346,40 @@ class LearningProgramCreateIn(Schema):
     start_date: Optional[datetime] = None
     is_certified: bool = True
     branding_banner_url: Optional[str] = ""
+
+class LearningProgressUpdateIn(Schema):
+    progress_percentage: int
+    completed_modules: List[str] = []
+    is_completed: bool = False
+
+class LearningProgressUpdateOut(Schema):
+    program_id: int
+    progress_percentage: int
+    completed_modules: List[str] = []
+    is_completed: bool
+    certificate_id: Optional[str] = None
+    message: str
+
+class LearningProgramRecommendationItem(Schema):
+    program: LearningProgramOut
+    match_score: int
+    matched_skills: List[str] = []
+    gap_skills_covered: List[str] = []
+    expected_boost: str = ""
+    is_gap_booster: bool = False
+    is_enrolled: bool = False
+    user_progress: int = 0
+    completed_modules: List[str] = []
+    recommendation_reason: str = ""
+
+class LearningRecommendationsResponseOut(Schema):
+    recommended_programs: List[LearningProgramRecommendationItem]
+    skill_gap_boosters: List[LearningProgramRecommendationItem]
+    enrolled_programs: List[LearningProgramRecommendationItem]
+    all_programs: List[LearningProgramRecommendationItem]
+    target_role: str
+    verified_skills_count: int
+    top_gap_skills: List[str]
 
 
 # --- PLACEMENT REPORTING SCHEMAS ---

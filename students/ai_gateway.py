@@ -231,20 +231,11 @@ class AIGateway:
                     f"5. Question 5 (VIVA - HARD): High-stakes scenario, edge case, audit challenge, trade-off analysis, or crisis response matching their field.\n\n"
                 )
 
-                if github_repos:
-                    repos_summary = [f"{r.get('name')} ({', '.join(r.get('languages', []))}) - {r.get('description', '')}" for r in github_repos[:3]]
-                    prompt += (
-                        f"Anti-Vibe-Coding Verification Mandate:\n"
-                        f"Candidate has verified GitHub codebases: {repos_summary}\n"
-                        f"For Question 4 or Question 5 (VIVA), directly anchor the question to one of their specific repositories above. "
-                        f"Ask the candidate to explain their system design, data flow, error handling strategy, or architectural trade-offs "
-                        f"in that project to verify deep engineering comprehension and detect superficial AI-prompt vibe coding.\n\n"
-                    )
-
                 prompt += (
                     f"For VIVA questions, set 'options' to null and 'correct_answer' to null, and write a detailed "
                     f"grading rubric explanation of what a high-quality answer must mention."
                 )
+
 
                 test_data = AIGateway._execute_gemini_request(model, prompt, response_schema)
                 
@@ -363,19 +354,6 @@ class AIGateway:
         q4_text = f"Explain the high-level methodology and architectural decisions you would take to implement a robust solution for a core {role_title} project."
         q4_expl = "Candidate should explain modular structure, requirement analysis, testing strategy, and practical trade-offs."
 
-        if github_repos and isinstance(github_repos, list) and len(github_repos) > 0:
-            top_repo = github_repos[0]
-            repo_name = top_repo.get("name", "your core project")
-            repo_langs = ", ".join(top_repo.get("languages", [])) or "your chosen stack"
-            q4_text = (
-                f"[Anti-Vibe-Coding Architectural Viva] In your GitHub repository '{repo_name}' ({repo_langs}), "
-                f"explain how you architected the data flow, handled state persistence, and implemented error recovery "
-                f"if a primary dependency or network service experiences downtime."
-            )
-            q4_expl = (
-                f"Anti-Vibe-Coding Verification: Candidate must explain modular system design, exception handling, "
-                f"idempotency, and real architecture in their actual repository '{repo_name}' rather than AI-prompted vibe coding."
-            )
 
         questions = [
             {

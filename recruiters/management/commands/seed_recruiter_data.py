@@ -26,7 +26,7 @@ class Command(BaseCommand):
                 "is_verified": True,
                 "website": "https://careers.google.com",
                 "industry": it_sector,
-                "branding_logo_url": "https://logo.clearbit.com/google.com",
+                "branding_logo_url": "https://upload.wikimedia.org/wikipedia/commons/2/2f/Google_2015_logo.svg",
                 "description": "Global leader in search, cloud computing, artificial intelligence, and hyperscale systems.",
                 "headquarters": "Bengaluru, Karnataka, India"
             },
@@ -36,7 +36,7 @@ class Command(BaseCommand):
                 "is_verified": True,
                 "website": "https://www.tatamotors.com",
                 "industry": mech_sector,
-                "branding_logo_url": "https://logo.clearbit.com/tatamotors.com",
+                "branding_logo_url": "https://upload.wikimedia.org/wikipedia/commons/8/8e/Tata_logo.svg",
                 "description": "Pioneering commercial and electric vehicle engineering, battery management, and CAD simulation.",
                 "headquarters": "Mumbai, Maharashtra, India"
             },
@@ -46,7 +46,7 @@ class Command(BaseCommand):
                 "is_verified": True,
                 "website": "https://www.morganstanley.com/careers",
                 "industry": fin_sector,
-                "branding_logo_url": "https://logo.clearbit.com/morganstanley.com",
+                "branding_logo_url": "https://upload.wikimedia.org/wikipedia/commons/3/34/Morgan_Stanley_Logo_1.svg",
                 "description": "Multinational investment bank and financial services firm leading quantitative trading and risk analytics.",
                 "headquarters": "Mumbai, Maharashtra, India"
             },
@@ -56,7 +56,7 @@ class Command(BaseCommand):
                 "is_verified": True,
                 "website": "https://careers.microsoft.com",
                 "industry": it_sector,
-                "branding_logo_url": "https://logo.clearbit.com/microsoft.com",
+                "branding_logo_url": "https://upload.wikimedia.org/wikipedia/commons/9/96/Microsoft_logo_%282012%29.svg",
                 "description": "Worldwide leader in software, cloud infrastructure, AI models, and enterprise platforms.",
                 "headquarters": "Hyderabad, Telangana, India"
             },
@@ -66,7 +66,7 @@ class Command(BaseCommand):
                 "is_verified": True,
                 "website": "https://www.larsentoubro.com",
                 "industry": mech_sector,
-                "branding_logo_url": "https://logo.clearbit.com/larsentoubro.com",
+                "branding_logo_url": "https://upload.wikimedia.org/wikipedia/commons/e/e5/L%26T.png",
                 "description": "Indian multinational engaged in EPC projects, smart infrastructure, and high-tech defense engineering.",
                 "headquarters": "Mumbai, Maharashtra, India"
             },
@@ -76,7 +76,7 @@ class Command(BaseCommand):
                 "is_verified": True,
                 "website": "https://zerodha.com",
                 "industry": fin_sector,
-                "branding_logo_url": "https://logo.clearbit.com/zerodha.com",
+                "branding_logo_url": "https://upload.wikimedia.org/wikipedia/en/thumb/9/95/Zerodha_logo.svg/320px-Zerodha_logo.svg.png",
                 "description": "India's largest retail stock broker and FinTech innovator pioneering low-latency trading infrastructure.",
                 "headquarters": "Bengaluru, Karnataka, India"
             }
