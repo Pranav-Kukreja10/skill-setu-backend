@@ -118,7 +118,7 @@ class StudentProfile(models.Model):
     nheqf_level = models.CharField(
         max_length=25,
         choices=NHEQFLevel.choices,
-        default=NHEQFLevel.LEVEL_6_0,
+        default='',
         blank=True,
         help_text="National Higher Education Qualifications Framework level"
     )
@@ -344,9 +344,9 @@ class StudentProfile(models.Model):
             "apaar_id": self.apaar_id or None,
             "abc_id": self.abc_id or None,
             "is_apaar_verified": is_apaar_valid,
-            "nheqf_level": self.nheqf_level,
-            "nheqf_level_display": self.get_nheqf_level_display() if hasattr(self, 'get_nheqf_level_display') else self.nheqf_level,
-            "major_degree": self.degree or "General Studies",
+            "nheqf_level": self.nheqf_level or None,
+            "nheqf_level_display": (self.get_nheqf_level_display() if hasattr(self, 'get_nheqf_level_display') else self.nheqf_level) if self.nheqf_level else None,
+            "major_degree": self.degree or None,
             "minor_specialization": self.minor_specialization or None,
             "ncrf_credits": ncrf,
             "aicte_activity_points": aicte,

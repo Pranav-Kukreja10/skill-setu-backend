@@ -79,19 +79,13 @@ def calculate_role_score(skills_matrix: dict, benchmark: JobBenchmark) -> int:
     final_score = int((0.5 * core_score) + (0.3 * method_score) + (0.2 * tooling_score))
     return min(final_score, 100)
 
-def generate_role_fit_matrix(skills_matrix: dict) -> dict:
-    """
-    Generates the multi-role fitment scores dynamically using 
-    active database benchmarks stored in PostgreSQL.
-    Filters out any role where the candidate has a <= 5% match.
-    """
+def generate_role_fit_matrix(skills_matrix: dict, current_designation: str = "", target_roles: list = None, degree: str = "") -> dict:
     matrix = {}
     benchmarks = JobBenchmark.objects.select_related('sector').all()
     
     for benchmark in benchmarks:
         score = calculate_role_score(skills_matrix, benchmark)
         
-        # UX FILTER: Hide completely irrelevant cards
         if score <= 5:
             continue
         
@@ -108,6 +102,27 @@ def generate_role_fit_matrix(skills_matrix: dict) -> dict:
             "sector": benchmark.sector.name,
             "verified_confidence_score": None
         }
+
+    if not matrix and (current_designation or target_roles or degree):
+        candidate_terms = set()
+        if current_designation:
+            candidate_terms.update([w.lower() for w in current_designation.split() if len(w) > 2])
+        if target_roles:
+            for tr in target_roles:
+                candidate_terms.update([w.lower() for w in tr.split() if len(w) > 2])
+        if degree:
+            candidate_terms.update([w.lower() for w in degree.split() if len(w) > 2])
+
+        for benchmark in benchmarks:
+            bench_words = set(benchmark.role_title.lower().split())
+            if candidate_terms & bench_words:
+                matrix[benchmark.role_title] = {
+                    "score": 25,
+                    "fit_level": "Foundational Aspirant (Skills Needed)",
+                    "sector": benchmark.sector.name,
+                    "verified_confidence_score": 0
+                }
+
     return matrix
 
 
@@ -173,6 +188,7 @@ def compute_profile_strength(profile) -> tuple:
     Computes candidate profile strength (0-100) using the approved industry standard:
     P_overall = 0.45 * S_cognitive + 0.30 * S_projects_exp + 0.15 * S_certifications + 0.10 * S_academics
     Enriches S_projects_exp with verified GitHub engineering score when available.
+    Brand new profiles with no skills or assessments get default score 0.0.
     Returns (profile_strength_score, breakdown_dict).
     """
     # 1. Cognitive Assessment Score (45%)
@@ -180,11 +196,11 @@ def compute_profile_strength(profile) -> tuple:
     
     # 2. Projects & Applied Experience Score (30%)
     weights = [
-        v.get("weight", 50) 
+        v.get("weight", 0.0) 
         for v in (profile.skills_matrix or {}).values() 
-        if isinstance(v, dict)
+        if isinstance(v, dict) and v.get("weight") is not None
     ]
-    mean_skills_weight = float(sum(weights) / len(weights)) if weights else 40.0
+    mean_skills_weight = float(sum(weights) / len(weights)) if weights else 0.0
 
     # Enrich with GitHub Engineering Production Score if screened
     gh_metrics = getattr(profile, "github_metrics", {}) or {}
@@ -210,15 +226,19 @@ def compute_profile_strength(profile) -> tuple:
     if profile.cgpa is not None:
         s_academics = min(100.0, float(profile.cgpa) * 10.0)
     else:
-        s_academics = 70.0  # campus baseline
+        s_academics = 0.0  # default 0 for unupdated profile
         
-    p_overall = round(
-        (0.45 * s_cognitive) +
-        (0.30 * s_projects_exp) +
-        (0.15 * s_cert) +
-        (0.10 * s_academics),
-        2
-    )
+    # Brand new users with no skills, assessments, certifications, or GPA get default 0.0
+    if not weights and s_cognitive == 0.0 and s_cert == 0.0 and s_academics == 0.0:
+        p_overall = 0.0
+    else:
+        p_overall = round(
+            (0.45 * s_cognitive) +
+            (0.30 * s_projects_exp) +
+            (0.15 * s_cert) +
+            (0.10 * s_academics),
+            2
+        )
     
     breakdown = {
         "cognitive_score": round(s_cognitive, 2),

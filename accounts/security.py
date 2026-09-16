@@ -11,16 +11,19 @@ class JWTAuth(HttpBearer):
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
             token_role = payload.get("role")
             
-            # Stateless Role Check: Reject unauthorized roles immediately with 0 database queries
+            user = User.objects.only("id", "username", "email", "role", "auth_provider", "avatar_url", "phone_number").get(id=payload["user_id"]) 
+            
             if self.allowed_roles is not None:
-                if token_role not in self.allowed_roles:
+                allowed_upper = {str(r).upper() for r in self.allowed_roles}
+                token_role_upper = str(token_role).upper() if token_role else ""
+                user_role_upper = str(user.role).upper() if user.role else ""
+                if token_role_upper not in allowed_upper and user_role_upper not in allowed_upper:
                     return None
 
-            user = User.objects.only("id", "username", "email", "role", "auth_provider", "avatar_url", "phone_number").get(id=payload["user_id"]) 
             request.jwt_payload = payload
             user.jwt_payload = payload
             return user 
-        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist):
+        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist, KeyError):
             return None
 
 class RecruiterAuth(JWTAuth):

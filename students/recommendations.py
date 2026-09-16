@@ -62,18 +62,26 @@ PROJECT_SUGGESTIONS = {
     # Marketing & Growth
     "seo": "Conduct technical on-page SEO audits, keyword gap analysis, and implement structured schema markup.",
     "digital marketing": "Develop a multi-channel performance marketing campaign with CAC, ROAS projections, and A/B split testing.",
-    "content strategy": "Build a topical editorial calendar, conversion copy funnels, and organic lead nurture email sequences."
+    "content strategy": "Build a topical editorial calendar, conversion copy funnels, and organic lead nurture email sequences.",
+    "quality assurance": "Establish an automated QA testing pipeline with unit, integration, and regression suites and defect lifecycle tracking.",
+    "test automation": "Architect a data-driven test automation framework in Selenium/Playwright with parallel execution and HTML reporting.",
+    "functional testing": "Design a comprehensive test matrix and boundary-value test suite covering critical business journeys.",
+    "api testing": "Build an automated REST API test collection in Postman/Newman with assertions on schemas, status codes, and latency.",
+    "selenium": "Automate cross-browser cross-device UI flows with Selenium WebDriver and Page Object Model (POM) architecture.",
+    "cypress": "Write fast, reliable end-to-end browser tests in Cypress with mocked network requests and CI workflow integration.",
+    "jira": "Configure an Agile Scrum sprint board with customized issue types, workflow transitions, and bug severity SLAs.",
+    "hp alm quality center": "Manage requirement traceability matrices and defect lifecycle tracking across testing sprints.",
+    "hp qtp": "Build regression test automation scripts using descriptive programming and shared object repositories.",
+    "performance testing": "Execute load and stress testing using JMeter or k6 to identify server bottlenecks and throughput limits.",
+    "c": "Develop low-level systems utilities with pointers, dynamic memory allocation, and Valgrind leak checking.",
+    "vb script": "Automate enterprise test scripts with modular error handling, regular expressions, and file I/O operations.",
+    "automation": "Design an automated regression testing harness triggered on git pull requests with test artifact generation."
 }
 
 def compute_personalized_recommendations(
     student_profile: StudentProfile,
     limit: int = 20
 ) -> Dict[str, Any]:
-    """
-    Reverse Matching & Personalized Recommendations:
-    Dynamically scores all published job & internship postings against the candidate's verified skills_matrix.
-    Returns listings ranked descending by direct match percentage, with matched and missing skill breakdowns.
-    """
     from django.utils import timezone
     published_listings = JobListing.objects.filter(
         status=JobListing.ListingStatus.PUBLISHED
@@ -84,6 +92,21 @@ def compute_personalized_recommendations(
     c_matrix = student_profile.skills_matrix or {}
     c_skills = {k.lower().strip() for k in c_matrix.keys()}
     target_roles = [tr.lower().strip() for tr in (student_profile.target_roles or [])]
+    current_designation = (student_profile.current_designation or "").strip()
+    desig_lower = current_designation.lower()
+    desig_words = {w for w in desig_lower.split() if len(w) > 2}
+    conf = float(student_profile.overall_confidence_score or 0.0)
+    is_verified = bool(student_profile.is_verified and conf >= 60.0)
+
+    if is_verified:
+        global_candidate_tier = "ENTERPRISE_VERIFIED"
+        tier_description = "Candidate has completed AI cognitive screening with verified confidence score."
+    elif len(c_skills) >= 2:
+        global_candidate_tier = "EVIDENCE_UNVERIFIED"
+        tier_description = "Resume claims detected. Adaptive skill assessment required to unlock verified 75%+ tier."
+    else:
+        global_candidate_tier = "FOUNDATIONAL_ASPIRANT"
+        tier_description = "Zero/minimal verified skills. Recommendations grounded strictly on declared career designation and entry pathways."
 
     scored = []
     for listing in published_listings:
@@ -94,39 +117,34 @@ def compute_personalized_recommendations(
         matched = [s for s in req_skills if s.lower().strip() in c_skills]
         missing = [s for s in req_skills if s.lower().strip() not in c_skills]
 
-        # Overlap ratio
-        overlap_ratio = len(matched) / max(1, len(req_skills))
+        l_title_lower = listing.title.lower().strip()
+        l_title_words = set(l_title_lower.split())
 
-        # Target role bonus (+5% if listing title matches candidate's target job role)
-        role_bonus = 5.0 if any(tr in listing.title.lower() for tr in target_roles) else 0.0
+        has_desig_alignment = False
+        if desig_lower and (desig_lower in l_title_lower or l_title_lower in desig_lower or bool(desig_words & l_title_words)):
+            has_desig_alignment = True
+        for tr in target_roles:
+            if tr in l_title_lower or l_title_lower in tr:
+                has_desig_alignment = True
+                break
 
-        # Verified credential bonus (+5% if student verified knowledge via AI test)
-        verif_bonus = 5.0 if student_profile.is_verified else 0.0
+        is_entry_level = listing.role_type in [JobListing.RoleType.INTERNSHIP, JobListing.RoleType.APPRENTICESHIP]
 
-        # NEP 2020 Multidisciplinary Minor Synergy Check (Clause 11.3)
-        minor_spec = (student_profile.minor_specialization or "").lower().strip()
         is_nep_multidisciplinary_match = False
-        nep_match_reason = None
         nep_synergy_bonus = 0.0
-
-        if minor_spec:
-            minor_kw_map = {
-                "data": ["python", "sql", "tableau", "powerbi", "pandas", "data analytics", "statistics", "excel", "machine learning"],
-                "analytics": ["python", "sql", "tableau", "powerbi", "pandas", "data analytics", "statistics", "excel"],
-                "finance": ["accounting", "valuation", "gst", "tally", "finance", "financial modeling", "excel", "dcf", "taxation"],
-                "fintech": ["accounting", "finance", "python", "sql", "blockchain", "payment gateways"],
-                "design": ["figma", "ui/ux", "wireframing", "adobe", "user research", "design thinking", "ui design", "ux design"],
-                "ui/ux": ["figma", "ui/ux", "wireframing", "adobe", "user research", "design thinking"],
-                "marketing": ["seo", "digital marketing", "content strategy", "salesforce", "crm", "growth"],
-                "management": ["operations management", "business analysis", "swot", "project management", "supply chain", "crm"],
-            }
-            relevant_kws = set()
-            for key, kw_list in minor_kw_map.items():
-                if key in minor_spec:
-                    relevant_kws.update(kw_list)
-            if not relevant_kws:
-                relevant_kws = {w.strip() for w in minor_spec.split() if len(w.strip()) > 2}
-
+        nep_match_reason = None
+        if student_profile.minor_specialization and student_profile.minor_specialization.lower().strip() != "none":
+            minor_kw = student_profile.minor_specialization.lower().strip()
+            relevant_kws = {minor_kw}
+            if "ai" in minor_kw or "intelligence" in minor_kw:
+                relevant_kws.update(["python", "machine learning", "deep learning", "nlp", "computer vision", "tensorflow", "pytorch"])
+            elif "design" in minor_kw or "ui" in minor_kw:
+                relevant_kws.update(["figma", "ui/ux", "wireframing", "adobe xd", "prototyping"])
+            elif "finance" in minor_kw:
+                relevant_kws.update(["financial modeling", "excel", "accounting", "valuation", "taxation", "tally"])
+            elif "business" in minor_kw or "management" in minor_kw:
+                relevant_kws.update(["business analysis", "market research", "project management", "crm", "salesforce"])
+            
             minor_matches = [s for s in req_skills if s.lower().strip() in relevant_kws]
             if minor_matches:
                 is_nep_multidisciplinary_match = True
@@ -134,22 +152,95 @@ def compute_personalized_recommendations(
                 deg_label = student_profile.degree or "Major"
                 nep_match_reason = f"NEP 2020 Multidisciplinary Synergy: Bridges your {deg_label} with your '{student_profile.minor_specialization}' Minor ({', '.join(minor_matches[:3])})!"
 
-        # Direct match percentage (0 - 100%)
-        match_pct = round(min(100.0, (overlap_ratio * 85.0) + role_bonus + verif_bonus + nep_synergy_bonus), 1)
+        if global_candidate_tier == "FOUNDATIONAL_ASPIRANT":
+            if has_desig_alignment:
+                base_intent = 22.0
+                if is_entry_level:
+                    base_intent += 6.0
+                if nep_synergy_bonus > 0:
+                    base_intent += 3.0
+                match_pct = round(min(32.0, base_intent), 1)
+                fit_level = "Foundational Aspirant (Designation Aligned)"
+                candidate_tier = "FOUNDATIONAL_ASPIRANT"
+                label_target = current_designation or (target_roles[0] if target_roles else "entry career path")
+                recommendation_reason = f"Grounded on your declared career designation '{label_target}'. Zero verified skills detected on profile. Complete the 5-minute Skill Assessment to unlock 80%+ Enterprise Verified status."
+            else:
+                if is_entry_level:
+                    match_pct = 14.0
+                    fit_level = "Early Career Explorer"
+                    candidate_tier = "FOUNDATIONAL_ASPIRANT"
+                    recommendation_reason = "Entry-level training opportunity open to candidates building initial competencies."
+                else:
+                    match_pct = 8.0
+                    fit_level = "Skill Gap: Assessment Required"
+                    candidate_tier = "UNVERIFIED_ASPIRANT"
+                    recommendation_reason = "Core technical skills missing. Complete skill screening or foundational programs to qualify."
 
-        if match_pct >= 75.0:
-            fit_level = "High Match"
-        elif match_pct >= 50.0:
-            fit_level = "Moderate Match"
+        elif global_candidate_tier == "EVIDENCE_UNVERIFIED":
+            weighted_sum = 0.0
+            for s in matched:
+                s_key = s.lower().strip()
+                item_w = c_matrix.get(s_key, {})
+                w_val = item_w.get("weight", 50) if isinstance(item_w, dict) else 50
+                weighted_sum += w_val
+            weighted_overlap = (weighted_sum / (100.0 * max(1, len(req_skills))))
+            role_bonus = 5.0 if has_desig_alignment else 0.0
+            raw_match = (weighted_overlap * 75.0) + role_bonus + nep_synergy_bonus
+            match_pct = round(min(68.0, max(15.0, raw_match)), 1)
+            candidate_tier = "EVIDENCE_UNVERIFIED"
+            if match_pct >= 50.0:
+                fit_level = "Evidence-Backed (Unverified Test)"
+            else:
+                fit_level = "Developing Match (Unverified)"
+            recommendation_reason = "Resume claims detected. Complete the adaptive assessment to verify syntax and reasoning to reach 85%+ verified tier."
+
         else:
-            fit_level = "Developing Match"
+            weighted_sum = 0.0
+            for s in matched:
+                s_key = s.lower().strip()
+                item_w = c_matrix.get(s_key, {})
+                w_val = item_w.get("weight", 50) if isinstance(item_w, dict) else 50
+                weighted_sum += w_val
+            weighted_overlap = (weighted_sum / (100.0 * max(1, len(req_skills))))
+            role_bonus = 5.0 if has_desig_alignment else 0.0
+            test_boost = (conf * 0.10)
+            raw_match = (weighted_overlap * 75.0) + test_boost + role_bonus + nep_synergy_bonus
+            match_pct = round(min(100.0, max(15.0, raw_match)), 1)
+            candidate_tier = "ENTERPRISE_VERIFIED"
+            if match_pct >= 75.0:
+                fit_level = "Enterprise High Match (Verified)"
+            elif match_pct >= 50.0:
+                fit_level = "Moderate Match (Verified)"
+            else:
+                fit_level = "Developing Match"
+            recommendation_reason = "Verified competencies directly match recruiter job requirements with anti-cheat test telemetry."
 
         comp = listing.company
+        h_mode = getattr(listing, 'hiring_mode', 'COMPANY') or 'COMPANY'
+        r_id = listing.recruiter.id if listing.recruiter else None
+        r_user = listing.recruiter.user if (listing.recruiter and hasattr(listing.recruiter, 'user')) else None
+        r_name = f"{getattr(r_user, 'first_name', '')} {getattr(r_user, 'last_name', '')}".strip() or getattr(r_user, 'username', '') if r_user else ""
+        r_avatar = getattr(r_user, 'avatar_url', None) or "" if r_user else ""
+        comp_name = comp.name if comp else "Partner Company"
+        comp_logo = comp.branding_logo_url if comp else ""
+
+        if h_mode == 'INDIVIDUAL':
+            h_display = r_name or comp_name
+            h_logo = r_avatar or comp_logo
+        else:
+            h_display = comp_name
+            h_logo = comp_logo or r_avatar
+
         scored.append({
             "listing_id": listing.id,
             "title": listing.title,
-            "company_name": comp.name if comp else "Partner Company",
-            "company_logo": comp.branding_logo_url if comp else "",
+            "company_name": comp_name,
+            "company_logo": comp_logo,
+            "recruiter_id": r_id,
+            "recruiter_name": r_name,
+            "hiring_mode": h_mode,
+            "hiring_display_name": h_display,
+            "hiring_logo_url": h_logo,
             "location": listing.location,
             "is_remote": listing.is_remote,
             "role_type": listing.role_type,
@@ -159,6 +250,8 @@ def compute_personalized_recommendations(
             "application_deadline": listing.application_deadline,
             "match_percentage": match_pct,
             "fit_level": fit_level,
+            "candidate_tier": candidate_tier,
+            "recommendation_reason": recommendation_reason,
             "is_nep_multidisciplinary_match": is_nep_multidisciplinary_match,
             "nep_match_reason": nep_match_reason,
             "matched_skills": matched,
@@ -167,13 +260,14 @@ def compute_personalized_recommendations(
             "description": listing.description[:300] + "..." if len(listing.description) > 300 else listing.description
         })
 
-    # Sort descending by match percentage
-    scored.sort(key=lambda x: x["match_percentage"], reverse=True)
+    scored.sort(key=lambda x: (x["match_percentage"], 1 if x["candidate_tier"] == "ENTERPRISE_VERIFIED" else 0), reverse=True)
 
     return {
         "candidate_id": student_profile.id,
         "candidate_skills_count": len(c_skills),
         "total_recommendations": len(scored),
+        "candidate_tier": global_candidate_tier,
+        "tier_description": tier_description,
         "recommendations": scored[:limit]
     }
 
@@ -188,47 +282,103 @@ def compute_skill_gap_roadmap(
     Produces actionable 'Skills to build next' with estimated match score gain (+X% boost)
     and practical project suggestions.
     """
-    listings_qs = JobListing.objects.filter(status=JobListing.ListingStatus.PUBLISHED).only('id', 'title', 'search_corpus', 'required_skills')
-    if target_role and target_role.strip():
-        role_filter = target_role.strip().lower()
-        matching_listings = list(listings_qs.filter(
-            Q(title__icontains=role_filter) | Q(search_corpus__icontains=role_filter)
-        ))
-        if matching_listings:
-            listings = matching_listings
-        else:
-            listings = list(listings_qs)
-    else:
-        listings = list(listings_qs)
+    resolved_target_role = target_role.strip() if (target_role and target_role.strip()) else ""
+    if not resolved_target_role:
+        if student_profile.current_designation and student_profile.current_designation.strip():
+            resolved_target_role = student_profile.current_designation.strip()
+        elif student_profile.target_roles and len(student_profile.target_roles) > 0:
+            resolved_target_role = student_profile.target_roles[0]
+        elif student_profile.role_fit_matrix:
+            sorted_fits = sorted(
+                student_profile.role_fit_matrix.items(),
+                key=lambda item: float(item[1].get("score", 0) if isinstance(item[1], dict) else 0),
+                reverse=True
+            )
+            if sorted_fits:
+                resolved_target_role = sorted_fits[0][0]
 
     c_matrix = student_profile.skills_matrix or {}
-    c_skills_lower = {k.lower().strip(): v.get("weight", 0) if isinstance(v, dict) else int(v) for k, v in c_matrix.items()}
+    c_skills_lower = {}
+    for k, v in c_matrix.items():
+        val = v.get("weight", 0) if isinstance(v, dict) else int(v)
+        c_skills_lower[k.lower().strip()] = int(val)
 
-    # Aggregate skill demand across open postings
+    for cat_list in (student_profile.skills_categorized or {}).values():
+        if isinstance(cat_list, list):
+            for sk in cat_list:
+                sk_clean = sk.lower().strip()
+                if sk_clean not in c_skills_lower:
+                    c_skills_lower[sk_clean] = int(student_profile.overall_confidence_score or 75)
+
+    listings_qs = JobListing.objects.filter(status=JobListing.ListingStatus.PUBLISHED).only('id', 'title', 'search_corpus', 'required_skills')
+    
     skill_counts = Counter()
-    for l in listings:
+    matched_listings = []
+    
+    if resolved_target_role:
+        role_words = [w.lower() for w in resolved_target_role.split() if len(w) > 2]
+        for l in listings_qs:
+            title_lower = (l.title or "").lower()
+            corpus_lower = (l.search_corpus or "").lower()
+            if any(w in title_lower or w in corpus_lower for w in role_words):
+                matched_listings.append(l)
+        
+        benchmarks = list(JobBenchmark.objects.filter(
+            Q(role_title__icontains=resolved_target_role) |
+            Q(sector__name__icontains=resolved_target_role)
+        ))
+        if not benchmarks:
+            for w in role_words:
+                bms = list(JobBenchmark.objects.filter(role_title__icontains=w))
+                if bms:
+                    benchmarks.extend(bms)
+        
+        for bm in benchmarks:
+            for s in (bm.core_skills + bm.tooling_skills + bm.methodology_skills):
+                skill_counts[s.lower().strip()] += 3
+
+    if not matched_listings:
+        for l in listings_qs:
+            reqs = [r.lower().strip() for r in (l.required_skills or [])]
+            if any(sk in c_skills_lower for sk in reqs):
+                matched_listings.append(l)
+
+    effective_listings = matched_listings if matched_listings else list(listings_qs)
+
+    for l in effective_listings:
         for s in (l.required_skills or []):
             skill_counts[s.lower().strip()] += 1
 
-    # Also augment with benchmarks if postings are few
-    if len(listings) < 3:
-        for bm in JobBenchmark.objects.all():
-            for s in (bm.core_skills + bm.tooling_skills + bm.methodology_skills):
-                skill_counts[s.lower().strip()] += 1
+    for sk_name in c_skills_lower.keys():
+        if sk_name not in skill_counts:
+            skill_counts[sk_name] += 1
 
-    total_sources = max(1, len(listings) if len(listings) >= 3 else (len(listings) + JobBenchmark.objects.count()))
+    total_sources = max(1, len(effective_listings) + 2)
 
     market_demand = []
     missing_skills_pool = []
 
-    for skill, count in skill_counts.most_common(20):
-        demand_pct = round((count / total_sources) * 100.0, 1)
+    priority_skills = []
+    for sk, weight in c_skills_lower.items():
+        if sk in skill_counts:
+            priority_skills.append(sk)
+
+    other_skills = [sk for sk, _ in skill_counts.most_common(25) if sk not in priority_skills]
+    ordered_skills = priority_skills[:10] + other_skills[:10]
+
+    seen = set()
+    for skill in ordered_skills:
+        if skill in seen:
+            continue
+        seen.add(skill)
+        count = skill_counts.get(skill, 1)
+        demand_pct = round(min(100.0, max(30.0, (count / total_sources) * 100.0)), 1)
         user_weight = c_skills_lower.get(skill, 0)
         has_skill = skill in c_skills_lower and user_weight >= 60
 
         item = {
-            "skill": skill.capitalize(),
-            "market_demand_percentage": min(100.0, demand_pct),
+            "skill": skill.title() if len(skill) > 3 else skill.upper(),
+            "market_demand_percentage": demand_pct,
             "candidate_proficiency": user_weight,
             "status": "PROFICIENT" if has_skill else ("NEEDS_IMPROVEMENT" if skill in c_skills_lower else "MISSING")
         }
@@ -237,20 +387,20 @@ def compute_skill_gap_roadmap(
         if not has_skill:
             missing_skills_pool.append((skill, demand_pct))
 
-    # Formulate prioritized 'Skills to build next'
+    missing_skills_pool.sort(key=lambda x: x[1], reverse=True)
+
     skills_to_build = []
     for skill, demand_pct in missing_skills_pool[:6]:
-        # Estimated match boost is proportional to market demand
         boost_estimate = f"+{int(min(35, max(12, demand_pct * 0.45)))}% Match Increase"
-        priority = "HIGH" if demand_pct >= 50.0 else ("MEDIUM" if demand_pct >= 30.0 else "RECOMMENDED")
+        priority = "HIGH" if demand_pct >= 60.0 else ("MEDIUM" if demand_pct >= 40.0 else "RECOMMENDED")
         
         project_idea = PROJECT_SUGGESTIONS.get(
             skill.lower(),
-            f"Build a practical case study or portfolio deliverable demonstrating applied proficiency in {skill.capitalize()} with measurable business outcomes."
+            f"Build a practical case study or portfolio deliverable demonstrating applied proficiency in {skill.title()} with measurable outcomes."
         )
 
         skills_to_build.append({
-            "skill": skill.capitalize(),
+            "skill": skill.title() if len(skill) > 3 else skill.upper(),
             "priority": priority,
             "market_demand_percentage": demand_pct,
             "expected_match_boost": boost_estimate,
@@ -259,8 +409,8 @@ def compute_skill_gap_roadmap(
 
     return {
         "candidate_id": student_profile.id,
-        "target_role_analyzed": target_role or "All Industry Domains",
-        "total_jobs_analyzed": len(listings),
+        "target_role_analyzed": resolved_target_role or "Resume Domain Profile",
+        "total_jobs_analyzed": len(effective_listings),
         "candidate_verified_skills_count": len(c_skills_lower),
         "market_demand_breakdown": market_demand,
         "skills_to_build_next": skills_to_build

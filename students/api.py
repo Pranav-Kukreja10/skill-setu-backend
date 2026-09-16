@@ -58,6 +58,9 @@ from students.schemas import (
     GitHubSyncInSchema
 )
 from students.github_screening import screen_github_profile
+from skillsetu_backend.cache_utils import (
+    get_cached, set_cached, generate_cache_key, invalidate_by_prefix, invalidate_cache_keys
+)
 from recruiters.schemas import (
     CandidateJobSearchIn,
     CandidateJobSearchResponseOut,
@@ -72,12 +75,56 @@ router = Router(tags=["Students"], auth=JWTAuth())
 
 
 def _student_to_out_schema(profile: StudentProfile) -> dict:
-    """Format StudentProfile to StudentProfileOutSchema dict with safe fallback defaults."""
+    matrix = dict(profile.skills_matrix or {})
+    cats = profile.skills_categorized or {}
+    conf = int(profile.overall_confidence_score or 0)
+    is_verif = bool(profile.is_verified or conf >= 60)
+    
+    modified = False
+    for cat, skills in cats.items():
+        if isinstance(skills, list):
+            for s in skills:
+                s_lower = s.lower().strip()
+                if s_lower not in matrix:
+                    if is_verif and conf >= 60:
+                        base_w = conf if cat == 'technical_skills' else (int(conf * 0.95) if cat == 'frameworks' else (int(conf * 0.92) if cat == 'tools' else int(conf * 0.88)))
+                    else:
+                        base_w = 82 if cat == 'technical_skills' else (80 if cat == 'frameworks' else (76 if cat == 'tools' else 72))
+                    matrix[s_lower] = {
+                        "weight": base_w,
+                        "project_evidence": base_w,
+                        "experience_recency": max(40, base_w - 5),
+                        "is_certified": False,
+                        "credential_bonus": 1.0,
+                        "is_verified": is_verif and conf >= 60,
+                        "verified_score": conf if (is_verif and conf >= 60) else None
+                    }
+                    modified = True
+                else:
+                    entry = matrix[s_lower]
+                    if isinstance(entry, dict) and is_verif and conf >= 60 and entry.get("weight", 0) == 50:
+                        entry["weight"] = conf
+                        entry["project_evidence"] = conf
+                        entry["is_verified"] = True
+                        entry["verified_score"] = conf
+                        modified = True
+
+    if modified:
+        profile.skills_matrix = matrix
+        try:
+            profile.save(update_fields=['skills_matrix'])
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Silent skills_matrix sync failed for user {profile.user_id}: {e}")
+
     p_strength, breakdown = compute_profile_strength(profile)
     return {
         "id": profile.id,
         "username": profile.user.username,
         "email": profile.user.email,
+        "first_name": profile.user.first_name or "",
+        "last_name": profile.user.last_name or "",
+        "avatar_url": getattr(profile.user, 'avatar_url', "") or "",
         "bio": profile.bio or "",
         "current_designation": getattr(profile, 'current_designation', "") or "",
         "experience_years": getattr(profile, 'experience_years', 0.0) or 0.0,
@@ -86,10 +133,10 @@ def _student_to_out_schema(profile: StudentProfile) -> dict:
         "degree": profile.degree or "",
         "cgpa": profile.cgpa,
         "graduation_year": profile.graduation_year,
-        "apaar_id": getattr(profile, 'apaar_id', "") or "",
-        "abc_id": getattr(profile, 'abc_id', "") or "",
+        "apaar_id": profile.apaar_id if profile.apaar_id else "",
+        "abc_id": profile.abc_id if profile.abc_id else "",
         "minor_specialization": getattr(profile, 'minor_specialization', "") or "",
-        "nheqf_level": getattr(profile, 'nheqf_level', "LEVEL_6_0") or "LEVEL_6_0",
+        "nheqf_level": profile.nheqf_level if profile.nheqf_level else "",
         "github_handle": profile.github_handle,
         "github_url": getattr(profile, 'github_url', "") or "",
         "linkedin_url": profile.linkedin_url or "",
@@ -99,7 +146,7 @@ def _student_to_out_schema(profile: StudentProfile) -> dict:
         "internships": getattr(profile, 'internships', []) or [],
         "achievements": getattr(profile, 'achievements', []) or [],
         "academic_records": getattr(profile, 'academic_records', []) or [],
-        "skills_matrix": profile.skills_matrix or {},
+        "skills_matrix": matrix,
         "skills_categorized": profile.skills_categorized or {},
         "raw_extracted_skills": profile.raw_extracted_skills or [],
         "role_fit_matrix": profile.role_fit_matrix or {},
@@ -388,6 +435,17 @@ def analyze_student_resume(request, payload: ResumeAnalysisInSchema):
             index_student_profile(profile)
         except Exception:
             pass
+
+        invalidate_by_prefix("skillsetu:placement:")
+        # Invalidate user-specific caches after resume analysis
+        from django.core.cache import cache
+        for key in [f"skillsetu:profile:me:{request.auth.id}",
+                    f"skillsetu:recs:{request.auth.id}",
+                    f"skillsetu:roadmap:{request.auth.id}"]:
+            try:
+                cache.delete(key)
+            except Exception:
+                pass
         
         return 200, _student_to_out_schema(profile)
     except Exception as e:
@@ -404,8 +462,14 @@ def analyze_student_resume(request, payload: ResumeAnalysisInSchema):
 @router.get("/me", response=StudentProfileOutSchema)
 def get_my_profile(request):
     """Retrieve the currently logged-in student's full verified profile."""
+    cache_key = f"skillsetu:profile:me:{request.auth.id}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
     profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
-    return _student_to_out_schema(profile)
+    result = _student_to_out_schema(profile)
+    set_cached(cache_key, result, timeout=30)  # Short TTL — profile data is personal
+    return result
 
 
 @router.put("/me", response=StudentProfileOutSchema)
@@ -416,6 +480,27 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
     """
     profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
     
+    # Update linked User model fields if provided
+    user = profile.user
+    user_updated = False
+    if payload.username and payload.username.strip() != user.username:
+        new_username = payload.username.strip()
+        if User.objects.filter(username=new_username).exclude(id=user.id).exists():
+            return 400, {"message": "Username is already taken by another account."}
+        user.username = new_username
+        user_updated = True
+    if payload.first_name is not None and payload.first_name.strip() != (user.first_name or ""):
+        user.first_name = payload.first_name.strip()
+        user_updated = True
+    if payload.last_name is not None and payload.last_name.strip() != (user.last_name or ""):
+        user.last_name = payload.last_name.strip()
+        user_updated = True
+    if payload.avatar_url is not None and payload.avatar_url.strip() != (user.avatar_url or ""):
+        user.avatar_url = payload.avatar_url.strip()
+        user_updated = True
+    if user_updated:
+        user.save()
+
     if payload.bio is not None:
         profile.bio = payload.bio
     if payload.gender is not None:
@@ -481,6 +566,7 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
         ]
         profile.skills_matrix = build_skills_matrix(raw_skills, certs)
         profile.role_fit_matrix = generate_role_fit_matrix(profile.skills_matrix)
+        profile.raw_extracted_skills = list(profile.skills_matrix.keys())
     elif payload.certifications is not None and profile.skills_matrix:
         raw_skills = [
             {
@@ -492,7 +578,11 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
         ]
         profile.skills_matrix = build_skills_matrix(raw_skills, payload.certifications)
         profile.role_fit_matrix = generate_role_fit_matrix(profile.skills_matrix)
+        profile.raw_extracted_skills = list(profile.skills_matrix.keys())
 
+    # Dynamically recompute overall profile strength score
+    p_strength, _ = compute_profile_strength(profile)
+    profile.profile_strength_score = p_strength
     profile.save()
 
     # Re-index search corpus with updated qualifications
@@ -500,6 +590,16 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
         index_student_profile(profile)
     except Exception:
         pass
+
+    # Invalidate user-specific caches after profile update
+    from django.core.cache import cache
+    for key in [f"skillsetu:profile:me:{request.auth.id}",
+                f"skillsetu:recs:{request.auth.id}",
+                f"skillsetu:roadmap:{request.auth.id}"]:
+        try:
+            cache.delete(key)
+        except Exception:
+            pass
 
     return _student_to_out_schema(profile)
 
@@ -519,8 +619,8 @@ def get_my_settings(request):
     return profile.get_preferences()
 
 
-@router.patch("/me/settings", response=StudentPreferencesSchema)
-@router.put("/me/settings", response=StudentPreferencesSchema)
+@router.patch("/me/settings", response=StudentPreferencesSchema, operation_id="students_update_my_settings_patch")
+@router.put("/me/settings", response=StudentPreferencesSchema, operation_id="students_update_my_settings_put")
 def update_my_settings(request, payload: StudentPreferencesUpdateIn):
     """
     Update candidate's granular personalization preferences:
@@ -591,11 +691,11 @@ def export_nep_academic_transcript(request):
 
     return 200, {
         "transcript_id": f"NEP-{profile.id}-{datetime.now().strftime('%Y%m%d%H%M')}",
-        "apaar_id": profile.apaar_id or "UNLINKED",
-        "abc_id": profile.abc_id or "UNLINKED",
+        "apaar_id": profile.apaar_id or "",
+        "abc_id": profile.abc_id or "",
         "student_name": name,
-        "institution": profile.institution or "Verified Higher Education Institution",
-        "degree_major": profile.degree or "General Studies",
+        "institution": profile.institution or "",
+        "degree_major": profile.degree or "",
         "minor_specialization": profile.minor_specialization or "None",
         "nheqf_level": profile.nheqf_level,
         "ncrf_credits_earned": ncrf["total_ncrf_credits"],
@@ -612,84 +712,34 @@ def export_nep_academic_transcript(request):
 
 @router.post("/me/github-sync", response={200: GitHubRadarOutSchema, 400: dict}, auth=StudentAuth())
 def sync_candidate_github_profile(request, data: Optional[GitHubSyncInSchema] = None):
-    """
-    Public-Safe GitHub Screening & Anti-Vibe-Coding Radar:
-    Screens public repositories, commit cadence, conventional commits,
-    CI/CD workflows, Dockerfiles, and automated test suites.
-    Boosts skill weights (Pe) for verified technologies and recalculates candidate profile strength.
-    """
-    profile = get_object_or_404(StudentProfile, user=request.auth)
-    
-    handle = None
-    if data and data.github_handle:
-        handle = data.github_handle.strip()
-    elif profile.github_handle:
-        handle = profile.github_handle.strip()
-    elif profile.github_url:
-        handle = profile.github_url.strip()
-    elif data and data.repo_urls:
-        from students.github_screening import parse_repo_identifier
-        for u in data.repo_urls:
-            owner, _ = parse_repo_identifier(u)
-            if owner:
-                handle = owner
-                break
-        
-    if not handle and not (data and data.repo_urls):
-        return 400, {
-            "message": "Please provide a GitHub username, handle, or repository URLs to screen."
-        }
-        
-    selected_repos = data.selected_repos if data else None
-    repo_urls = data.repo_urls if data else None
-    token = data.github_token if data else None
-    radar = screen_github_profile(handle, token=token, selected_repos=selected_repos, repo_urls=repo_urls)
-    
-    if not radar.get("is_screened"):
-        return 400, {
-            "message": radar.get("summary", "Could not screen GitHub profile.")
-        }
-        
-    if radar.get("github_handle"):
-        profile.github_handle = radar["github_handle"]
-        if not profile.github_url:
-            profile.github_url = f"https://github.com/{radar['github_handle']}"
-            
-    profile.github_metrics = radar
-    profile.github_synced_at = timezone.now()
-    
-    # Boost skills_matrix for verified GitHub technologies
-    verified_skills = radar.get("synergy_skills_verified", [])
-    if profile.skills_matrix and verified_skills:
-        current_skills_list = []
-        for s_name, s_data in profile.skills_matrix.items():
-            if isinstance(s_data, dict):
-                current_skills_list.append({
-                    "name": s_name,
-                    "project_evidence_score": s_data.get("project_evidence", 50),
-                    "experience_recency_score": s_data.get("experience_recency", 50)
-                })
-        if current_skills_list:
-            profile.skills_matrix = build_skills_matrix(
-                extracted_skills_list=current_skills_list,
-                certifications=profile.certifications,
-                github_verified_skills=verified_skills
-            )
-            
-    p_strength = compute_profile_strength(profile)[0]
-    profile.profile_strength_score = p_strength
-    profile.save()
-    
-    return 200, radar
+    return 400, {
+        "message": "GitHub screening is currently disabled."
+    }
 
 
 @router.get("/me/github-radar", response={200: GitHubRadarOutSchema, 404: dict}, auth=StudentAuth())
 def get_candidate_github_radar(request):
-    """
-    Retrieves the candidate's cached GitHub Engineering & Anti-Vibe-Coding Radar.
-    """
-    profile = get_object_or_404(StudentProfile, user=request.auth)
-    return 200, profile.get_github_radar()
+    return 200, {
+        "github_handle": "",
+        "is_screened": False,
+        "engineering_score": 0.0,
+        "anti_vibe_index": 0.0,
+        "badge": "Disabled",
+        "summary": "GitHub screening is currently disabled.",
+        "public_repos_count": 0,
+        "total_stars": 0,
+        "total_commits_analyzed": 0,
+        "conventional_commits_pct": 0.0,
+        "has_ci_cd": False,
+        "has_docker": False,
+        "has_tests": False,
+        "has_linter": False,
+        "top_languages": [],
+        "top_repositories": [],
+        "synergy_skills_verified": [],
+        "synced_at": None
+    }
+
 
 
 @router.get("/{student_id}/portfolio", response={200: StudentPortfolioOutSchema, 404: dict})
@@ -701,6 +751,8 @@ def get_candidate_portfolio_by_id(request, student_id: int, blind: bool = False)
     for unbiased, merit-based screening.
     """
     profile = StudentProfile.objects.filter(id=student_id).select_related('user').first()
+    if not profile:
+        profile = StudentProfile.objects.filter(user_id=student_id).select_related('user').first()
     if not profile:
         return 404, {"message": f"Candidate profile with ID {student_id} not found."}
     return 200, _student_to_portfolio_schema(profile, is_blind=blind)
@@ -829,32 +881,14 @@ def get_student_screening_test(request, role_title: str, focus_repo: Optional[st
         
     try:
         skills_keys = list(profile.skills_matrix.keys())
-        all_gh_repos = (profile.github_metrics or {}).get("top_repositories", [])
-
-        # Fair Repository Selection:
-        # 1. If candidate passed focus_repo, find and prioritize it
-        # 2. Else prioritize candidate-selected/showcase repos and exclude academic labs / dead repos
-        selected_viva_repos = []
-        if focus_repo:
-            matched = [r for r in all_gh_repos if r.get("name", "").lower() == focus_repo.lower()]
-            if matched:
-                selected_viva_repos = matched
-
-        if not selected_viva_repos:
-            selected_viva_repos = [
-                r for r in all_gh_repos 
-                if r.get("is_eligible_for_viva", True) and not r.get("is_academic", False) and not r.get("is_dormant", False)
-            ]
-
-        if not selected_viva_repos and all_gh_repos:
-            selected_viva_repos = all_gh_repos[:1]
         
         test_session = AIGateway.generate_adaptive_test(
             role_title=role_title,
             skills=skills_keys,
             projects=profile.projects,
-            github_repos=selected_viva_repos
+            github_repos=None
         )
+
         
         db_session = TestSession.objects.create(
             student_profile=profile,
@@ -897,11 +931,50 @@ def submit_student_screening_test(request, data: TestSubmissionInSchema = Body(.
     if db_session.is_completed:
         return 400, {"message": "This test session has already been completed and graded."}
     
-    role_fit_data = profile.role_fit_matrix.get(data.target_role)
+    target_role_clean = (data.target_role or db_session.target_role or "").strip()
+    role_fit_data = (profile.role_fit_matrix or {}).get(target_role_clean)
+    
+    if not role_fit_data and profile.role_fit_matrix:
+        for r_title, r_data in profile.role_fit_matrix.items():
+            if r_title.lower().strip() == target_role_clean.lower():
+                role_fit_data = r_data
+                target_role_clean = r_title
+                break
+                
     if not role_fit_data:
-        return 400, {"message": f"You do not have a parsed resume score for the role: {data.target_role}"}
+        from students.models import JobBenchmark
+        from students.services import calculate_role_score
         
-    resume_rating = float(role_fit_data.get("score", 0))
+        benchmark = (
+            JobBenchmark.objects.filter(role_title__iexact=target_role_clean).first() or
+            JobBenchmark.objects.filter(role_title__icontains=target_role_clean).first()
+        )
+        if not benchmark and target_role_clean:
+            first_word = target_role_clean.split()[0]
+            benchmark = JobBenchmark.objects.filter(role_title__icontains=first_word).first()
+            
+        if benchmark:
+            score = calculate_role_score(profile.skills_matrix or {}, benchmark)
+            fit_level = "High Match" if score >= 75 else ("Medium Match" if score >= 40 else "Low Match")
+            role_fit_data = {
+                "score": score,
+                "fit_level": fit_level,
+                "sector": benchmark.sector.name if benchmark.sector else "General",
+                "verified_confidence_score": None
+            }
+        else:
+            role_fit_data = {
+                "score": 50.0,
+                "fit_level": "Direct Assessment",
+                "sector": "General",
+                "verified_confidence_score": None
+            }
+            
+        if not profile.role_fit_matrix:
+            profile.role_fit_matrix = {}
+        profile.role_fit_matrix[target_role_clean] = role_fit_data
+
+    resume_rating = float(role_fit_data.get("score", 50.0))
 
     try:
         submitted_answers = [{"id": ans.id, "answer_text": ans.answer_text, "time_taken_seconds": ans.time_taken_seconds} for ans in data.answers]
@@ -931,22 +1004,57 @@ def submit_student_screening_test(request, data: TestSubmissionInSchema = Body(.
             }
 
         role_fit_data["verified_confidence_score"] = grading_result["confidence_score"]
-        profile.role_fit_matrix[data.target_role] = role_fit_data
-        profile.overall_confidence_score = grading_result["confidence_score"]
+        updated_role_fit = dict(profile.role_fit_matrix or {})
+        updated_role_fit[target_role_clean] = role_fit_data
+        if data.target_role and data.target_role != target_role_clean:
+            updated_role_fit[data.target_role] = role_fit_data
+        profile.role_fit_matrix = updated_role_fit
+
+        new_conf = float(grading_result["confidence_score"])
+        profile.overall_confidence_score = max(
+            float(profile.overall_confidence_score or 0),
+            new_conf
+        )
         
-        if grading_result["confidence_score"] >= 60:
+        if new_conf >= 60 or profile.overall_confidence_score >= 60:
             profile.is_verified = True
+
+        if new_conf >= 60 and profile.skills_matrix:
+            updated_skills = dict(profile.skills_matrix)
+            target_role_words = [w.lower() for w in target_role_clean.split() if len(w) > 2]
+            for s_name, s_data in updated_skills.items():
+                if isinstance(s_data, dict):
+                    if any(w in s_name.lower() for w in target_role_words) or not target_role_words:
+                        s_data["is_verified"] = True
+                        s_data["verified_score"] = int(new_conf)
+                        s_data["weight"] = max(s_data.get("weight", 0), int(new_conf))
+                        s_data["project_evidence"] = max(s_data.get("project_evidence", 0), int(new_conf))
+                        s_data["experience_recency"] = max(s_data.get("experience_recency", 0), int(new_conf) - 5)
+            profile.skills_matrix = updated_skills
             
         profile.save()
 
-        # Trigger search corpus and embedding indexing post-grading
-        try:
-            index_student_profile(profile)
-        except Exception:
-            pass
-        
         db_session.is_completed = True
         db_session.save()
+
+        # Re-index search corpus (safe inline — no daemon thread risk)
+        try:
+            index_student_profile(profile)
+        except Exception as idx_err:
+            import logging
+            logging.getLogger(__name__).warning(f"Post-grading index failed for {profile.user_id}: {idx_err}")
+
+        # Invalidate all user-specific and placement caches after grading
+        invalidate_by_prefix("skillsetu:placement:")
+        from django.core.cache import cache
+        for prefix in [f"skillsetu:profile:me:{request.auth.id}",
+                       f"skillsetu:recs:{request.auth.id}",
+                       f"skillsetu:roadmap:{request.auth.id}",
+                       f"skillsetu:notifs:{request.auth.id}"]:
+            try:
+                cache.delete(prefix)
+            except Exception:
+                pass
 
         return 200, {
             "success": True,
@@ -968,7 +1076,7 @@ def submit_student_screening_test(request, data: TestSubmissionInSchema = Body(.
 # 4. JOB & INTERNSHIP DISCOVERY FEED
 # ---------------------------------------------------------
 
-@router.get("/jobs/feed", response=JobDiscoveryFeedOut)
+@router.get("/jobs/feed", response=JobDiscoveryFeedOut, auth=None)
 def get_job_discovery_feed(
     request,
     role_type: Optional[str] = None,
@@ -979,17 +1087,15 @@ def get_job_discovery_feed(
     target_gender: Optional[str] = None,
     q: Optional[str] = None
 ):
-    """
-    Active Openings Feed:
-    Displays published job and internship openings with dynamic filters for
-    role type, location, remote arrangement, DEI diversity hiring drives, and required technical skills.
-    Excludes past deadlines automatically.
-    """
+    cache_key = generate_cache_key("jobs_feed", role_type=role_type, location=location, is_remote=is_remote, skill_tag=skill_tag, is_diversity_drive=is_diversity_drive, target_gender=target_gender, q=q)
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     qs = JobListing.objects.filter(
         status=JobListing.ListingStatus.PUBLISHED
     ).select_related('company', 'recruiter__user')
 
-    # Exclude expired deadlines
     qs = qs.filter(
         models.Q(application_deadline__gte=timezone.now()) |
         models.Q(application_deadline__isnull=True)
@@ -1018,13 +1124,33 @@ def get_job_discovery_feed(
 
     feed_items = []
     for l in qs:
+        h_mode = getattr(l, 'hiring_mode', 'COMPANY') or 'COMPANY'
+        r_id = l.recruiter.id if l.recruiter else None
+        r_user = l.recruiter.user if (l.recruiter and hasattr(l.recruiter, 'user')) else None
+        r_name = f"{getattr(r_user, 'first_name', '')} {getattr(r_user, 'last_name', '')}".strip() or getattr(r_user, 'username', '') if r_user else ""
+        r_avatar = getattr(r_user, 'avatar_url', None) or "" if r_user else ""
+        comp_name = l.company.name if l.company else "Partner Company"
+        comp_logo = l.company.branding_logo_url if l.company else ""
+
+        if h_mode == 'INDIVIDUAL':
+            h_display = r_name or comp_name
+            h_logo = r_avatar or comp_logo
+        else:
+            h_display = comp_name
+            h_logo = comp_logo or r_avatar
+
         feed_items.append(JobDiscoveryItemOut(
             id=l.id,
             title=l.title,
             company_id=l.company.id,
-            company_name=l.company.name,
-            company_logo=l.company.branding_logo_url or "",
+            company_name=comp_name,
+            company_logo=comp_logo,
             company_website=l.company.website or "",
+            recruiter_id=r_id,
+            recruiter_name=r_name,
+            hiring_mode=h_mode,
+            hiring_display_name=h_display,
+            hiring_logo_url=h_logo,
             role_type=l.role_type,
             location=l.location,
             is_remote=getattr(l, 'is_remote', False),
@@ -1041,17 +1167,19 @@ def get_job_discovery_feed(
             created_at=l.created_at
         ))
 
-    return JobDiscoveryFeedOut(
+    result = JobDiscoveryFeedOut(
         total_jobs=len(feed_items),
         jobs=feed_items
     )
+    set_cached(cache_key, result, timeout=120)
+    return result
 
 
 # ---------------------------------------------------------
 # 5. NATURAL-LANGUAGE CANDIDATE JOB SEARCH
 # ---------------------------------------------------------
 
-@router.post("/jobs/search", response=CandidateJobSearchResponseOut)
+@router.post("/jobs/search", response=CandidateJobSearchResponseOut, auth=None)
 def search_jobs_post(request, payload: CandidateJobSearchIn):
     """
     Plain-Language Job Search Bar (POST):
@@ -1068,7 +1196,7 @@ def search_jobs_post(request, payload: CandidateJobSearchIn):
     return results
 
 
-@router.get("/jobs/search", response=CandidateJobSearchResponseOut)
+@router.get("/jobs/search", response=CandidateJobSearchResponseOut, auth=None)
 def search_jobs_get(
     request,
     q: str,
@@ -1113,6 +1241,13 @@ def apply_to_job(request, listing_id: int, payload: Optional[JobApplicationApply
                 return 400, {"message": "The application deadline for this position has passed."}
 
             student_profile, _ = StudentProfile.objects.select_for_update().get_or_create(user=request.auth)
+
+            # Gate: require at least 1 skill before allowing job applications
+            if not student_profile.skills_matrix:
+                return 400, {
+                    "message": "Please upload your resume or add skills to your profile before applying to jobs. "
+                               "This ensures recruiters can evaluate your candidacy effectively."
+                }
 
             existing = JobApplication.objects.filter(listing=listing, student=student_profile).first()
             if existing:
@@ -1204,8 +1339,26 @@ def get_personalized_recommendations(request, limit: int = 10):
     Scores all active job postings against the candidate's verified skills_matrix.
     Returns high-fit listings with match percentages, matched skills, and missing skill badges.
     """
+    cache_key = f"skillsetu:recs:{request.auth.id}:{limit}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
     profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
-    return compute_personalized_recommendations(profile, limit=limit)
+
+    # Gate: require at least 1 skill before generating recommendations
+    if not profile.skills_matrix:
+        return {
+            "candidate_id": profile.id,
+            "candidate_skills_count": 0,
+            "total_recommendations": 0,
+            "candidate_tier": "PROFILE_INCOMPLETE",
+            "tier_description": "Your profile has no skills yet. Upload your resume or add skills manually to unlock personalized job recommendations.",
+            "recommendations": []
+        }
+
+    result = compute_personalized_recommendations(profile, limit=limit)
+    set_cached(cache_key, result, timeout=120)  # 2 min TTL — recomputed on profile change
+    return result
 
 
 # ---------------------------------------------------------
@@ -1220,8 +1373,26 @@ def get_skill_gap_roadmap(request, target_role: Optional[str] = None):
     Produces prioritized 'Skills to build next' with estimated match percentage boosts
     and actionable engineering project ideas.
     """
+    cache_key = f"skillsetu:roadmap:{request.auth.id}:{target_role or 'default'}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
     profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
-    return compute_skill_gap_roadmap(profile, target_role=target_role)
+
+    # Gate: require at least 1 skill before generating roadmap
+    if not profile.skills_matrix:
+        return {
+            "candidate_id": profile.id,
+            "target_role_analyzed": target_role or "Not Set",
+            "total_jobs_analyzed": 0,
+            "candidate_verified_skills_count": 0,
+            "market_demand_breakdown": [],
+            "skills_to_build_next": []
+        }
+
+    result = compute_skill_gap_roadmap(profile, target_role=target_role)
+    set_cached(cache_key, result, timeout=180)  # 3 min TTL — roadmap is computationally heavy
+    return result
 
 
 # ---------------------------------------------------------
@@ -1234,7 +1405,13 @@ def get_notifications(request):
     Candidate Notifications Hub:
     Returns live notifications for application reviews, status transitions,
     scheduled interview dates, and system updates.
+    Cached for 15 seconds to reduce DB polling pressure.
     """
+    cache_key = f"skillsetu:notifs:{request.auth.id}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     notifs = Notification.objects.filter(user=request.auth).order_by('-created_at')
     unread_count = notifs.filter(is_read=False).count()
     total_count = notifs.count()
@@ -1253,17 +1430,20 @@ def get_notifications(request):
         for n in notifs[:50]
     ]
 
-    return NotificationsResponseOut(
+    result = NotificationsResponseOut(
         unread_count=unread_count,
         total_count=total_count,
         notifications=items
     )
+    set_cached(cache_key, result, timeout=15)  # 15s TTL — notifications poll frequently
+    return result
 
 
 @router.post("/notifications/read-all", response=dict)
 def mark_all_notifications_read(request):
     """Marks all notifications for the authenticated student as read."""
     updated = Notification.objects.filter(user=request.auth, is_read=False).update(is_read=True)
+    invalidate_cache_keys(f"skillsetu:notifs:{request.auth.id}")
     return {"success": True, "marked_read_count": updated}
 
 
@@ -1275,6 +1455,7 @@ def mark_notification_read(request, notification_id: int):
         return 404, {"message": "Notification not found."}
     notif.is_read = True
     notif.save(update_fields=['is_read'])
+    invalidate_cache_keys(f"skillsetu:notifs:{request.auth.id}")
     return 200, {"success": True, "message": "Notification marked as read."}
 
 
@@ -1399,27 +1580,29 @@ def search_students_post(request, payload: RecruiterSearchQueryIn):
     Restricted strictly to authenticated recruiters and admins.
     Supports blind: bool toggle for objective skill-first hiring.
     """
-    limit = payload.limit or 10
+    limit = payload.limit if payload.limit is not None else 10
     blind = payload.blind or False
     results = rank_student_profiles(query=payload.query, limit=limit, blind=blind)
     return results
 
 
 @router.get("/search", response=RecruiterSearchResponseOut, auth=RecruiterAuth())
-def search_students_get(request, q: str, limit: int = 10, blind: bool = False):
+def search_students_get(request, q: str, limit: Optional[int] = 10, blind: bool = False):
     """
     Recruiter Three-Signal Hybrid Search & Ranking (GET query param).
     Restricted strictly to authenticated recruiters and admins.
-    Supports blind=true query parameter.
+    Supports blind=true query parameter. Pass limit=0 to return all matching candidates.
     """
     results = rank_student_profiles(query=q, limit=limit, blind=blind)
     return results
 
 
 @router.get("/", response=List[StudentProfileOutSchema], auth=RecruiterAuth())
-def list_students(request):
-    """Retrieve all student profiles for recruiters."""
-    profiles = StudentProfile.objects.select_related('user').all()
+def list_students(request, limit: int = 500):
+    """Retrieve verified student profiles for recruiters (up to limit)."""
+    profiles = StudentProfile.objects.select_related('user').order_by(
+        '-is_verified', '-overall_confidence_score', '-profile_strength_score'
+    )[:limit]
     return [_student_to_out_schema(p) for p in profiles]
 
 
@@ -1527,11 +1710,11 @@ def get_live_government_schemes_directory(
     target_gender: Optional[str] = None,
     q: Optional[str] = None
 ):
-    """
-    Public Live Government Schemes Directory:
-    Universal discovery feed of national scholarships, research fellowships,
-    and corporate diversity programs across all academic fields.
-    """
+    cache_key = generate_cache_key("schemes_live", domain=domain, scheme_type=scheme_type, target_gender=target_gender, q=q)
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     qs = GovernmentScheme.objects.all()
     if domain:
         qs = qs.filter(domain__iexact=domain)
@@ -1568,11 +1751,13 @@ def get_live_government_schemes_directory(
             match_reasons=[],
             created_at=s.created_at
         ))
-    return {
+    result = {
         "total_schemes": len(items),
         "user_gender": None,
         "schemes": items
     }
+    set_cached(cache_key, result, timeout=300)
+    return result
 
 
 @schemes_router.post("/sync-live-status", response={200: dict})

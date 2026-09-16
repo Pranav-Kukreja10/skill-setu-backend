@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import re
+import time
 from pathlib import Path
 import requests
 from dotenv import load_dotenv
@@ -17,6 +18,11 @@ class AIGateway:
     """
     Unified, model-agnostic AI Gateway. Routes specific screening tasks 
     to dedicated Gemini models to optimize response times and free-tier RPD quotas.
+
+    Resilience Strategy (SIH-hardened):
+    - 3-attempt exponential-backoff retry on every Gemini request
+    - Automatic failover to Groq (OpenAI-compatible) if all Gemini attempts fail
+    - Graceful heuristic fallback if ALL cloud providers are unreachable
     """
     
     # Model Tier Definitions based on your AI Studio Limits
@@ -153,7 +159,7 @@ class AIGateway:
                     f"Resume Text:\n{raw_text[:6000]}"
                 )
 
-                res = AIGateway._execute_gemini_request(model, prompt, response_schema)
+                res = AIGateway._execute_cloud_request(model, prompt, response_schema)
                 if isinstance(res, dict):
                     res.setdefault("current_designation", "")
                     res.setdefault("experience_years", 0.0)
@@ -231,22 +237,13 @@ class AIGateway:
                     f"5. Question 5 (VIVA - HARD): High-stakes scenario, edge case, audit challenge, trade-off analysis, or crisis response matching their field.\n\n"
                 )
 
-                if github_repos:
-                    repos_summary = [f"{r.get('name')} ({', '.join(r.get('languages', []))}) - {r.get('description', '')}" for r in github_repos[:3]]
-                    prompt += (
-                        f"Anti-Vibe-Coding Verification Mandate:\n"
-                        f"Candidate has verified GitHub codebases: {repos_summary}\n"
-                        f"For Question 4 or Question 5 (VIVA), directly anchor the question to one of their specific repositories above. "
-                        f"Ask the candidate to explain their system design, data flow, error handling strategy, or architectural trade-offs "
-                        f"in that project to verify deep engineering comprehension and detect superficial AI-prompt vibe coding.\n\n"
-                    )
-
                 prompt += (
                     f"For VIVA questions, set 'options' to null and 'correct_answer' to null, and write a detailed "
                     f"grading rubric explanation of what a high-quality answer must mention."
                 )
 
-                test_data = AIGateway._execute_gemini_request(model, prompt, response_schema)
+
+                test_data = AIGateway._execute_cloud_request(model, prompt, response_schema)
                 
                 # Obfuscate correct answers and grading rubrics into a base64 session token
                 import base64
@@ -363,19 +360,6 @@ class AIGateway:
         q4_text = f"Explain the high-level methodology and architectural decisions you would take to implement a robust solution for a core {role_title} project."
         q4_expl = "Candidate should explain modular structure, requirement analysis, testing strategy, and practical trade-offs."
 
-        if github_repos and isinstance(github_repos, list) and len(github_repos) > 0:
-            top_repo = github_repos[0]
-            repo_name = top_repo.get("name", "your core project")
-            repo_langs = ", ".join(top_repo.get("languages", [])) or "your chosen stack"
-            q4_text = (
-                f"[Anti-Vibe-Coding Architectural Viva] In your GitHub repository '{repo_name}' ({repo_langs}), "
-                f"explain how you architected the data flow, handled state persistence, and implemented error recovery "
-                f"if a primary dependency or network service experiences downtime."
-            )
-            q4_expl = (
-                f"Anti-Vibe-Coding Verification: Candidate must explain modular system design, exception handling, "
-                f"idempotency, and real architecture in their actual repository '{repo_name}' rather than AI-prompted vibe coding."
-            )
 
         questions = [
             {
@@ -452,11 +436,34 @@ class AIGateway:
         }
 
     @staticmethod
-    def _execute_gemini_request(model_name: str, prompt_text: str, schema: dict) -> dict:
-        """Sends a robust, schema-enforced POST request to the Google Gemini API with a 120s timeout."""
+    def _execute_cloud_request(model_name: str, prompt_text: str, schema: dict) -> dict:
+        """
+        Multi-provider cloud AI request with resilient failover:
+        1. Gemini API with 3-attempt exponential backoff (2s, 4s, 8s)
+        2. Groq failover (OpenAI-compatible) if all Gemini attempts fail
+        3. Raises ConnectionError only if ALL providers fail
+        """
+        # --- Attempt 1: Gemini with retries ---
+        gemini_result = AIGateway._execute_gemini_with_retries(model_name, prompt_text, schema)
+        if gemini_result is not None:
+            return gemini_result
+
+        logger.warning("All Gemini attempts failed. Trying Groq failover for AI gateway request...")
+
+        # --- Attempt 2: Groq failover ---
+        groq_result = AIGateway._execute_groq_fallback(prompt_text)
+        if groq_result is not None:
+            return groq_result
+
+        raise ConnectionError(f"All AI providers (Gemini + Groq) failed for model {model_name}.")
+
+    @staticmethod
+    def _execute_gemini_with_retries(model_name: str, prompt_text: str, schema: dict, max_retries: int = 3) -> dict:
+        """Sends a robust, schema-enforced POST request to the Google Gemini API with 3-attempt exponential backoff."""
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise ValueError("GEMINI_API_KEY is missing in your .env configuration.")
+            logger.warning("GEMINI_API_KEY is missing — skipping Gemini.")
+            return None
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
@@ -471,13 +478,68 @@ class AIGateway:
             }
         }
 
-        try:
-            # Set timeout to 120 seconds to completely eliminate free-tier ReadTimeout crashes
-            response = requests.post(url, json=payload, timeout=120)
-            response.raise_for_status()
-            
-            result_json = response.json()
-            text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(text_response)
-        except Exception as e:
-            raise ConnectionError(f"Gemini API request failed on model {model_name}: {str(e)}")
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, json=payload, timeout=120)
+                response.raise_for_status()
+                
+                result_json = response.json()
+                text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
+                return json.loads(text_response)
+            except Exception as e:
+                wait_time = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                logger.warning(
+                    f"Gemini attempt {attempt + 1}/{max_retries} failed on {model_name}: {e}. "
+                    f"{'Retrying in ' + str(wait_time) + 's...' if attempt < max_retries - 1 else 'All Gemini retries exhausted.'}"
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(wait_time)
+
+        return None
+
+    @staticmethod
+    def _execute_groq_fallback(prompt_text: str) -> dict:
+        """
+        Failover: Routes the same prompt to Groq's OpenAI-compatible API.
+        Uses llama-3.3-70b-versatile with JSON mode.
+        """
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            logger.warning("GROQ_API_KEY not set — Groq failover skipped.")
+            return None
+
+        model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        url = "https://api.groq.com/openai/v1/chat/completions"
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are an expert AI assistant. Return ONLY valid JSON matching the user's requested schema. No markdown, no explanations — just the raw JSON object."},
+                {"role": "user", "content": prompt_text}
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.1,
+            "max_tokens": 4096
+        }
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+
+        for attempt in range(2):
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=60)
+                response.raise_for_status()
+
+                result = response.json()
+                content_text = result["choices"][0]["message"]["content"]
+                parsed = json.loads(content_text)
+                logger.info(f"Groq failover successful on attempt {attempt + 1}.")
+                return parsed
+            except Exception as e:
+                logger.warning(f"Groq failover attempt {attempt + 1}/2 failed: {e}")
+                if attempt == 0:
+                    time.sleep(1)
+
+        return None

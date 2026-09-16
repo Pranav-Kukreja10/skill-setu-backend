@@ -76,18 +76,34 @@ class RecruiterProfileUpdateIn(Schema):
     designation: Optional[str] = None
     department: Optional[str] = None
     contact_phone: Optional[str] = None
+    bio: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    website: Optional[str] = None
+    location: Optional[str] = None
+    experience_years: Optional[float] = None
+    hiring_mode_preference: Optional[str] = None
 
 class RecruiterProfileOut(Schema):
     id: int
     user_id: int
     username: str
     email: str
+    first_name: Optional[str] = ""
+    last_name: Optional[str] = ""
+    avatar_url: Optional[str] = None
     designation: str
     department: Optional[str] = ""
     contact_phone: Optional[str] = ""
+    bio: Optional[str] = ""
+    linkedin_url: Optional[str] = ""
+    website: Optional[str] = ""
+    location: Optional[str] = ""
+    experience_years: Optional[float] = 0.0
+    hiring_mode_preference: str = "COMPANY"
     is_company_admin: bool
     company: Optional[CompanyOut] = None
     preferences: Optional[Dict[str, Any]] = None
+    metrics: Optional[Dict[str, Any]] = None
 
 # --- JOB LISTING SCHEMAS ---
 
@@ -105,6 +121,7 @@ class JobListingCreateIn(Schema):
     required_skills: List[str] = []
     eligibility_criteria: Optional[Dict[str, Any]] = {}
     description: str
+    hiring_mode: Optional[str] = "COMPANY"  # COMPANY or INDIVIDUAL/SELF
     # DEI attributes
     is_diversity_drive: Optional[bool] = False
     target_gender: Optional[str] = "ALL"
@@ -125,6 +142,7 @@ class JobListingUpdateIn(Schema):
     required_skills: Optional[List[str]] = None
     eligibility_criteria: Optional[Dict[str, Any]] = None
     description: Optional[str] = None
+    hiring_mode: Optional[str] = None
     # DEI attributes
     is_diversity_drive: Optional[bool] = None
     target_gender: Optional[str] = None
@@ -140,6 +158,9 @@ class JobListingOut(Schema):
     company_headquarters: Optional[str] = ""
     recruiter_id: int
     recruiter_name: str
+    hiring_mode: str = "COMPANY"
+    hiring_display_name: str = ""
+    hiring_logo_url: Optional[str] = ""
     title: str
     role_type: str
     target_audience: str = "STUDENT"
@@ -160,6 +181,29 @@ class JobListingOut(Schema):
     applications_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+class RecruiterPublicProfileOut(Schema):
+    id: int
+    user_id: int
+    username: str
+    name: str
+    first_name: Optional[str] = ""
+    last_name: Optional[str] = ""
+    avatar_url: Optional[str] = None
+    designation: str
+    department: Optional[str] = ""
+    bio: Optional[str] = ""
+    linkedin_url: Optional[str] = ""
+    website: Optional[str] = ""
+    location: Optional[str] = ""
+    experience_years: Optional[float] = 0.0
+    hiring_mode_preference: str = "COMPANY"
+    is_verified: bool = True
+    company: Optional[CompanyOut] = None
+    active_jobs: List[JobListingOut] = []
+    total_openings: int = 0
+    total_placements: int = 0
+    created_at: datetime
 
 
 # --- CANDIDATE NLP JOB SEARCH SCHEMAS ---
@@ -194,6 +238,9 @@ class CandidateJobSearchResultOut(Schema):
     recruiter_id: int
     recruiter_name: str
     recruiter_designation: str
+    hiring_mode: str = "COMPANY"
+    hiring_display_name: str = ""
+    hiring_logo_url: Optional[str] = ""
     match_score: float
     skill_overlap_score: float
     semantic_score: float
@@ -211,9 +258,14 @@ class JobApplicationApplyIn(Schema):
     cover_note: Optional[str] = ""
 
 class JobApplicationStatusUpdateIn(Schema):
-    status: str  # APPLIED, UNDER_REVIEW, SHORTLISTED, INTERVIEW, OFFERED, REJECTED
+    status: str
     note: Optional[str] = ""
     interview_date: Optional[datetime] = None
+
+class NominateIn(Schema):
+    student_id: int
+    listing_id: int
+    note: Optional[str] = ""
 
 class ApplicantStudentOut(Schema):
     id: int
@@ -322,6 +374,12 @@ class LearningProgramOut(Schema):
     enrolled_students_count: int = 0
     enrolled_faculty_count: int = 0
     created_at: datetime
+    domain: Optional[str] = "Engineering & Tech"
+    modules: Optional[List[str]] = []
+    rating: Optional[float] = 4.8
+    level: Optional[str] = "Intermediate"
+    is_enrolled: Optional[bool] = False
+    user_progress: Optional[int] = 0
 
 class LearningProgramCreateIn(Schema):
     title: str
@@ -336,6 +394,40 @@ class LearningProgramCreateIn(Schema):
     start_date: Optional[datetime] = None
     is_certified: bool = True
     branding_banner_url: Optional[str] = ""
+
+class LearningProgressUpdateIn(Schema):
+    progress_percentage: int
+    completed_modules: List[str] = []
+    is_completed: bool = False
+
+class LearningProgressUpdateOut(Schema):
+    program_id: int
+    progress_percentage: int
+    completed_modules: List[str] = []
+    is_completed: bool
+    certificate_id: Optional[str] = None
+    message: str
+
+class LearningProgramRecommendationItem(Schema):
+    program: LearningProgramOut
+    match_score: int
+    matched_skills: List[str] = []
+    gap_skills_covered: List[str] = []
+    expected_boost: str = ""
+    is_gap_booster: bool = False
+    is_enrolled: bool = False
+    user_progress: int = 0
+    completed_modules: List[str] = []
+    recommendation_reason: str = ""
+
+class LearningRecommendationsResponseOut(Schema):
+    recommended_programs: List[LearningProgramRecommendationItem]
+    skill_gap_boosters: List[LearningProgramRecommendationItem]
+    enrolled_programs: List[LearningProgramRecommendationItem]
+    all_programs: List[LearningProgramRecommendationItem]
+    target_role: str
+    verified_skills_count: int
+    top_gap_skills: List[str]
 
 
 # --- PLACEMENT REPORTING SCHEMAS ---

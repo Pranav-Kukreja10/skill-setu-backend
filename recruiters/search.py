@@ -201,6 +201,14 @@ def rank_job_listings(
         # Three-signal fusion
         match_score = round((0.40 * skill_score) + (0.40 * semantic_score) + (0.20 * fulltext_score), 4)
 
+        h_mode = getattr(listing, 'hiring_mode', 'COMPANY') or 'COMPANY'
+        is_self = h_mode in ['INDIVIDUAL', 'SELF']
+        rec_user = listing.recruiter.user if (listing.recruiter and hasattr(listing.recruiter, 'user')) else None
+        rec_name = (f"{rec_user.first_name} {rec_user.last_name}".strip() or rec_user.username) if rec_user else "Independent Recruiter"
+        rec_avatar = (getattr(rec_user, 'avatar_url', '') or "") if rec_user else ""
+        disp_name = rec_name if is_self else (listing.company.name if listing.company else "Unknown Company")
+        disp_logo = rec_avatar if is_self else (listing.company.branding_logo_url if listing.company else "")
+
         scored_results.append({
             "id": listing.id,
             "title": listing.title,
@@ -215,14 +223,18 @@ def rank_job_listings(
             "required_skills": listing.required_skills or [],
             "eligibility_criteria": listing.eligibility_criteria or {},
             "description": listing.description,
+
             "company_id": listing.company.id if listing.company else 0,
-            "company_name": listing.company.name if listing.company else "Unknown Company",
-            "company_logo": listing.company.branding_logo_url if listing.company else "",
+            "company_name": disp_name,
+            "company_logo": disp_logo,
             "company_website": listing.company.website if listing.company else "",
             "company_headquarters": listing.company.headquarters if listing.company else "",
             "recruiter_id": listing.recruiter.id if listing.recruiter else 0,
-            "recruiter_name": listing.recruiter.user.username if listing.recruiter else "Hiring Team",
+            "recruiter_name": rec_name,
             "recruiter_designation": listing.recruiter.designation if listing.recruiter else "Recruiter",
+            "hiring_mode": h_mode,
+            "hiring_display_name": disp_name,
+            "hiring_logo_url": disp_logo,
             "match_score": match_score,
             "skill_overlap_score": skill_score,
             "semantic_score": semantic_score,

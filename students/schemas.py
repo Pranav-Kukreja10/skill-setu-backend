@@ -87,6 +87,10 @@ class StudentPreferencesUpdateIn(Schema):
     career_discovery: Optional[Dict[str, Any]] = None
 
 class StudentProfileInSchema(Schema):
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    avatar_url: Optional[str] = None
     bio: Optional[str] = None
     gender: Optional[str] = None
     current_designation: Optional[str] = None
@@ -119,6 +123,9 @@ class StudentProfileOutSchema(Schema):
     id: int
     username: str
     email: str
+    first_name: Optional[str] = ""
+    last_name: Optional[str] = ""
+    avatar_url: Optional[str] = ""
     gender: str = "PREFER_NOT_TO_SAY"
     bio: Optional[str] = None
     current_designation: Optional[str] = ""
@@ -349,11 +356,20 @@ class StudentAnswerInSchema(Schema):
     id: int
     answer_text: str
     time_taken_seconds: Optional[int] = 15
+    questionId: Optional[int] = None
+    timeSpent: Optional[int] = None
+    selectedOption: Optional[str] = None
+    confidenceDecay: Optional[float] = None
+    scoreEfficiency: Optional[float] = None
 
 class TestSubmissionInSchema(Schema):
     target_role: str
     session_id: int
     answers: List[StudentAnswerInSchema]
+    clusterId: Optional[Any] = None
+    candidateId: Optional[Any] = None
+    infractionCount: Optional[int] = 0
+    totalTimeSeconds: Optional[int] = 0
 
 class FeedbackDetailSchema(Schema):
     id: int
@@ -422,6 +438,11 @@ class JobDiscoveryItemOut(Schema):
     company_name: str
     company_logo: Optional[str] = ""
     company_website: Optional[str] = ""
+    recruiter_id: Optional[int] = None
+    recruiter_name: Optional[str] = ""
+    hiring_mode: str = "COMPANY"
+    hiring_display_name: str = ""
+    hiring_logo_url: Optional[str] = ""
     role_type: str
     location: str
     is_remote: bool
@@ -446,6 +467,11 @@ class PersonalizedRecommendationItemOut(Schema):
     title: str
     company_name: str
     company_logo: Optional[str] = ""
+    recruiter_id: Optional[int] = None
+    recruiter_name: Optional[str] = ""
+    hiring_mode: str = "COMPANY"
+    hiring_display_name: str = ""
+    hiring_logo_url: Optional[str] = ""
     location: str
     is_remote: bool
     role_type: str
@@ -455,6 +481,8 @@ class PersonalizedRecommendationItemOut(Schema):
     application_deadline: Optional[datetime] = None
     match_percentage: float
     fit_level: str
+    candidate_tier: Optional[str] = "ENTERPRISE_VERIFIED"
+    recommendation_reason: Optional[str] = None
     is_nep_multidisciplinary_match: bool = False
     nep_match_reason: Optional[str] = None
     matched_skills: List[str] = []
@@ -466,6 +494,8 @@ class PersonalizedRecommendationsFeedOut(Schema):
     candidate_id: int
     candidate_skills_count: int
     total_recommendations: int
+    candidate_tier: Optional[str] = "ENTERPRISE_VERIFIED"
+    tier_description: Optional[str] = None
     recommendations: List[PersonalizedRecommendationItemOut]
 
 class MarketDemandSkillOut(Schema):

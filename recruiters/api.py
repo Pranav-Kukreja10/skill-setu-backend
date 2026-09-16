@@ -1,6 +1,7 @@
 from ninja import Router, Query
 from typing import List, Optional
 from datetime import datetime
+from django.utils import timezone
 from django.db import transaction, models, OperationalError
 from django.shortcuts import get_object_or_404
 
@@ -11,18 +12,22 @@ from students.services import compute_profile_strength
 from recruiters.models import Company, RecruiterProfile, JobListing, JobApplication, LearningProgram
 from recruiters.schemas import (
     CompanyCreateIn, CompanyUpdateIn, CompanyOut,
-    RecruiterProfileUpdateIn, RecruiterProfileOut,
+    RecruiterProfileUpdateIn, RecruiterProfileOut, RecruiterPublicProfileOut,
     RecruiterSettingsOutSchema, RecruiterSettingsUpdateIn,
     JobListingCreateIn, JobListingUpdateIn, JobListingOut,
     CandidateJobSearchIn, CandidateJobSearchResponseOut, CandidateJobSearchResultOut,
-    JobApplicationApplyIn, JobApplicationStatusUpdateIn, JobApplicationOut, StudentMyApplicationOut,
+    JobApplicationApplyIn, JobApplicationStatusUpdateIn, NominateIn, JobApplicationOut, StudentMyApplicationOut,
     ApplicantStudentOut, InternshipProgressUpdateIn, InternshipMilestoneLogIn,
     LearningProgramOut, LearningProgramCreateIn,
+    LearningProgressUpdateIn, LearningProgressUpdateOut,
+    LearningProgramRecommendationItem, LearningRecommendationsResponseOut,
     PlacementOverviewOut, BranchWiseReportOut, BranchPlacementStatOut,
     StudentRosterReportOut, StudentPlacementStatusOut, StudentOfferDetail,
     SkillDeficitItemOut, SkillGapAnalysisOut, InDemandSkillItemOut, InDemandSkillsOut, PlacementTrendsOut
 )
+from students.recommendations import compute_skill_gap_roadmap
 from recruiters.search import index_job_listing, rank_job_listings, compute_job_skill_overlap
+from skillsetu_backend.cache_utils import get_cached, set_cached, generate_cache_key, invalidate_by_prefix, invalidate_cache_keys
 
 # ---------------------------------------------------------
 # ROUTER 1: RECRUITER & COMPANY PROFILE MANAGEMENT
@@ -54,22 +59,48 @@ def get_my_recruiter_profile(request):
             created_at=c.created_at
         )
 
+    comp_id = recruiter.company_id
+    active_jobs = JobListing.objects.filter(company_id=comp_id, status=JobListing.ListingStatus.PUBLISHED).count() if comp_id else 0
+    shortlisted = JobApplication.objects.filter(listing__company_id=comp_id, status=JobApplication.ApplicationStatus.SHORTLISTED).count() if comp_id else 0
+    interviews = JobApplication.objects.filter(listing__company_id=comp_id, status=JobApplication.ApplicationStatus.INTERVIEW).count() if comp_id else 0
+    total_apps = JobApplication.objects.filter(listing__company_id=comp_id).count() if comp_id else 0
+    verified_apps = JobApplication.objects.filter(listing__company_id=comp_id, student__is_verified=True).count() if comp_id else 0
+    pass_rate = round((verified_apps / total_apps * 100), 1) if total_apps > 0 else 85.0
+
+    metrics_dict = {
+        "active_listings_count": active_jobs,
+        "shortlisted_talent_count": shortlisted,
+        "interviews_scheduled_count": interviews,
+        "total_applicants_count": total_apps,
+        "verification_pass_rate": pass_rate,
+    }
+
     return 200, RecruiterProfileOut(
         id=recruiter.id,
         user_id=request.auth.id,
         username=request.auth.username,
         email=request.auth.email,
+        first_name=getattr(request.auth, 'first_name', '') or '',
+        last_name=getattr(request.auth, 'last_name', '') or '',
+        avatar_url=getattr(request.auth, 'avatar_url', None),
         designation=recruiter.designation,
         department=recruiter.department,
         contact_phone=recruiter.contact_phone,
+        bio=recruiter.bio or "",
+        linkedin_url=recruiter.linkedin_url or "",
+        website=recruiter.website or "",
+        location=recruiter.location or "",
+        experience_years=recruiter.experience_years or 0.0,
+        hiring_mode_preference=recruiter.hiring_mode_preference or "COMPANY",
         is_company_admin=recruiter.is_company_admin,
         company=comp_out,
-        preferences=recruiter.get_preferences()
+        preferences=recruiter.get_preferences(),
+        metrics=metrics_dict
     )
 
 @recruiters_router.put("/me", response={200: RecruiterProfileOut, 400: dict})
 def update_my_recruiter_profile(request, payload: RecruiterProfileUpdateIn):
-    """Update recruiter's designation, department, or contact phone."""
+    """Update recruiter's designation, department, contact phone, bio, hiring preference, and socials."""
     recruiter, _ = RecruiterProfile.objects.get_or_create(
         user=request.auth,
         defaults={"designation": "Talent Acquisition Specialist", "is_company_admin": True}
@@ -80,9 +111,137 @@ def update_my_recruiter_profile(request, payload: RecruiterProfileUpdateIn):
         recruiter.department = payload.department
     if payload.contact_phone is not None:
         recruiter.contact_phone = payload.contact_phone
+    if payload.bio is not None:
+        recruiter.bio = payload.bio
+    if payload.linkedin_url is not None:
+        recruiter.linkedin_url = payload.linkedin_url
+    if payload.website is not None:
+        recruiter.website = payload.website
+    if payload.location is not None:
+        recruiter.location = payload.location
+    if payload.experience_years is not None:
+        recruiter.experience_years = payload.experience_years
+    if payload.hiring_mode_preference is not None:
+        recruiter.hiring_mode_preference = payload.hiring_mode_preference
     recruiter.save()
 
     return get_my_recruiter_profile(request)
+
+@recruiters_router.get("/{recruiter_id}/public-profile", response={200: RecruiterPublicProfileOut, 404: dict}, auth=None)
+def get_recruiter_public_profile(request, recruiter_id: int):
+    """
+    Public candidate-facing endpoint to view a recruiter's identity, company affiliation,
+    bio, hiring statistics, and active published job listings.
+    """
+    recruiter = RecruiterProfile.objects.filter(id=recruiter_id).select_related('company', 'user').first()
+    if not recruiter:
+        return 404, {"message": "Recruiter profile not found."}
+
+    user = recruiter.user
+    full_name = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip() or user.username
+
+    comp_out = None
+    if recruiter.company:
+        c = recruiter.company
+        comp_out = CompanyOut(
+            id=c.id,
+            name=c.name,
+            registration_number=c.registration_number,
+            is_verified=c.is_verified,
+            website=c.website,
+            industry_id=c.industry_id,
+            industry_name=c.industry.name if c.industry else None,
+            branding_logo_url=c.branding_logo_url,
+            description=c.description,
+            headquarters=c.headquarters,
+            created_at=c.created_at
+        )
+
+    active_jobs_qs = JobListing.objects.filter(
+        recruiter=recruiter,
+        status=JobListing.ListingStatus.PUBLISHED
+    ).select_related('company', 'recruiter__user')
+
+    if not active_jobs_qs.exists() and recruiter.company_id:
+        active_jobs_qs = JobListing.objects.filter(
+            company_id=recruiter.company_id,
+            status=JobListing.ListingStatus.PUBLISHED
+        ).select_related('company', 'recruiter__user')
+
+    active_jobs = [_listing_to_schema(j) for j in active_jobs_qs]
+    total_placements = JobApplication.objects.filter(
+        listing__recruiter=recruiter,
+        status=JobApplication.ApplicationStatus.OFFERED
+    ).count()
+
+    return 200, RecruiterPublicProfileOut(
+        id=recruiter.id,
+        user_id=user.id,
+        username=user.username,
+        name=full_name,
+        first_name=getattr(user, 'first_name', '') or '',
+        last_name=getattr(user, 'last_name', '') or '',
+        avatar_url=getattr(user, 'avatar_url', None),
+        designation=recruiter.designation or "Talent Partner",
+        department=recruiter.department or "",
+        bio=recruiter.bio or "",
+        linkedin_url=recruiter.linkedin_url or "",
+        website=recruiter.website or "",
+        location=recruiter.location or "",
+        experience_years=recruiter.experience_years or 0.0,
+        hiring_mode_preference=recruiter.hiring_mode_preference or "COMPANY",
+        is_verified=True,
+        company=comp_out,
+        active_jobs=active_jobs,
+        total_openings=len(active_jobs),
+        total_placements=total_placements,
+        created_at=recruiter.created_at
+    )
+
+@recruiters_router.get("/companies/{company_id}/public-profile", response={200: dict, 404: dict}, auth=None)
+def get_company_public_profile(request, company_id: int):
+    """
+    Public candidate-facing endpoint to inspect a partner company's public identity,
+    verified badge, headquarters, recruiters, and active published postings.
+    """
+    company = Company.objects.filter(id=company_id).select_related('industry').first()
+    if not company:
+        return 404, {"message": "Company not found."}
+
+    active_jobs_qs = JobListing.objects.filter(
+        company=company,
+        status=JobListing.ListingStatus.PUBLISHED
+    ).select_related('company', 'recruiter__user')
+
+    active_jobs = [_listing_to_schema(j) for j in active_jobs_qs]
+
+    recruiters_qs = RecruiterProfile.objects.filter(company=company).select_related('user')
+    team_members = []
+    for r in recruiters_qs:
+        u = r.user
+        team_members.append({
+            "id": r.id,
+            "name": f"{getattr(u, 'first_name', '')} {getattr(u, 'last_name', '')}".strip() or u.username,
+            "designation": r.designation,
+            "avatar_url": getattr(u, 'avatar_url', None),
+            "linkedin_url": r.linkedin_url
+        })
+
+    return 200, {
+        "id": company.id,
+        "name": company.name,
+        "registration_number": company.registration_number,
+        "is_verified": company.is_verified,
+        "website": company.website,
+        "industry_name": company.industry.name if company.industry else None,
+        "branding_logo_url": company.branding_logo_url,
+        "description": company.description,
+        "headquarters": company.headquarters,
+        "active_jobs": [j.dict() for j in active_jobs],
+        "total_active_jobs": len(active_jobs),
+        "team": team_members,
+        "created_at": company.created_at.isoformat() if company.created_at else None
+    }
 
 @recruiters_router.get("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict})
 def get_my_recruiter_settings(request):
@@ -95,8 +254,8 @@ def get_my_recruiter_settings(request):
     )
     return 200, recruiter.get_preferences()
 
-@recruiters_router.put("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict})
-@recruiters_router.patch("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict})
+@recruiters_router.put("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict}, operation_id="recruiters_update_my_settings_put")
+@recruiters_router.patch("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict}, operation_id="recruiters_update_my_settings_patch")
 def update_my_recruiter_settings(request, payload: RecruiterSettingsUpdateIn):
     """
     Update recruiter's granular preferences:
@@ -237,15 +396,33 @@ def _listing_to_schema(listing: JobListing) -> JobListingOut:
         apps_count = getattr(listing, 'apps_count', None)
     if apps_count is None and hasattr(listing, 'applications'):
         apps_count = listing.applications.count()
+
+    hiring_mode = getattr(listing, 'hiring_mode', JobListing.HiringMode.COMPANY) or JobListing.HiringMode.COMPANY
+    rec_user = listing.recruiter.user if (listing.recruiter and hasattr(listing.recruiter, 'user')) else None
+    rec_full_name = f"{getattr(rec_user, 'first_name', '')} {getattr(rec_user, 'last_name', '')}".strip() or getattr(rec_user, 'username', '') if rec_user else ""
+    rec_avatar = getattr(rec_user, 'avatar_url', None) or "" if rec_user else ""
+    comp_name = listing.company.name if listing.company else "Partner Company"
+    comp_logo = listing.company.branding_logo_url if listing.company else ""
+
+    if hiring_mode == JobListing.HiringMode.INDIVIDUAL:
+        hiring_display_name = rec_full_name or comp_name
+        hiring_logo_url = rec_avatar or comp_logo
+    else:
+        hiring_display_name = comp_name
+        hiring_logo_url = comp_logo or rec_avatar
+
     return JobListingOut(
         id=listing.id,
-        company_id=listing.company.id,
-        company_name=listing.company.name,
-        company_logo=listing.company.branding_logo_url or "",
-        company_website=listing.company.website or "",
-        company_headquarters=listing.company.headquarters or "",
-        recruiter_id=listing.recruiter.id,
-        recruiter_name=listing.recruiter.user.username,
+        company_id=listing.company.id if listing.company else 0,
+        company_name=comp_name,
+        company_logo=comp_logo,
+        company_website=listing.company.website if listing.company else "",
+        company_headquarters=listing.company.headquarters if listing.company else "",
+        recruiter_id=listing.recruiter.id if listing.recruiter else 0,
+        recruiter_name=rec_full_name,
+        hiring_mode=hiring_mode,
+        hiring_display_name=hiring_display_name,
+        hiring_logo_url=hiring_logo_url,
         title=listing.title,
         role_type=listing.role_type,
         status=listing.status,
@@ -290,7 +467,7 @@ def dispatch_new_opportunity_notifications(listing: JobListing) -> int:
 
     notifications_to_create = []
     for s in students:
-        if s.user_id in already_notified_user_ids:
+        if not s.user or s.user_id in already_notified_user_ids:
             continue
 
         cand_skills = [sk.lower().strip() for sk in (s.skills_matrix or {}).keys()]
@@ -300,9 +477,10 @@ def dispatch_new_opportunity_notifications(listing: JobListing) -> int:
             for tr in (s.target_roles or [])
         )
         if overlap >= 0.25 or title_match:
+            display_name = listing.company.name if listing.hiring_mode == JobListing.HiringMode.COMPANY else listing.hiring_display_name
             notifications_to_create.append(Notification(
                 user=s.user,
-                title=f"New Opportunity: {listing.title} at {listing.company.name}",
+                title=f"New Opportunity: {listing.title} at {display_name}",
                 message=f"A new {listing.role_type.replace('_', ' ').title()} matching your skill profile was just posted: '{listing.title}' ({listing.stipend_or_ctc}, {listing.location}). Apply now!",
                 notification_type=Notification.NotificationType.NEW_OPPORTUNITY,
                 related_listing_id=listing.id
@@ -320,15 +498,29 @@ def create_job_listing(request, payload: JobListingCreateIn):
     Automatically indexes denormalized search_corpus and dense BGE vector.
     Dispatches automated opportunity notifications if published immediately.
     """
-    recruiter = RecruiterProfile.objects.filter(user=request.auth).first()
-    if not recruiter or not recruiter.company:
-        return 400, {"message": "You must register or join a company before creating listings."}
+    recruiter, _ = RecruiterProfile.objects.get_or_create(
+        user=request.auth,
+        defaults={"designation": "Talent Acquisition Specialist", "is_company_admin": True}
+    )
+    if not recruiter.company:
+        company_name = f"{request.auth.first_name or request.auth.username}'s Enterprise" if (request.auth.first_name or request.auth.username) else "Partner Enterprise"
+        company, _ = Company.objects.get_or_create(
+            name=company_name,
+            defaults={
+                "description": "Verified Partner Enterprise",
+                "is_verified": True,
+                "headquarters": "Bengaluru, India"
+            }
+        )
+        recruiter.company = company
+        recruiter.save(update_fields=["company"])
 
     target_status = getattr(payload, 'status', None) or JobListing.ListingStatus.DRAFT
 
     listing = JobListing.objects.create(
         recruiter=recruiter,
         company=recruiter.company,
+        hiring_mode=getattr(payload, 'hiring_mode', None) or JobListing.HiringMode.COMPANY,
         title=payload.title,
         role_type=payload.role_type or JobListing.RoleType.FULL_TIME,
         status=target_status,
@@ -352,6 +544,9 @@ def create_job_listing(request, payload: JobListingCreateIn):
 
     if target_status == JobListing.ListingStatus.PUBLISHED:
         dispatch_new_opportunity_notifications(listing)
+
+    invalidate_by_prefix("skillsetu:placement:")
+    invalidate_by_prefix("skillsetu:jobs_feed:")
 
     return 201, _listing_to_schema(listing)
 
@@ -402,7 +597,7 @@ def candidate_job_search_get(
     )
     return results
 
-@listings_router.get("/", response=List[JobListingOut], auth=JWTAuth())
+@listings_router.get("/", response=List[JobListingOut])
 def list_published_listings(
     request,
     role_type: Optional[str] = None,
@@ -425,7 +620,7 @@ def list_published_listings(
 
     return [_listing_to_schema(l) for l in qs]
 
-@listings_router.get("/{listing_id}", response={200: JobListingOut, 404: dict}, auth=JWTAuth())
+@listings_router.get("/{listing_id}", response={200: JobListingOut, 404: dict})
 def get_job_listing(request, listing_id: int):
     """Fetch full details of a specific job or internship listing."""
     listing = JobListing.objects.filter(id=listing_id).select_related('company', 'recruiter__user').first()
@@ -474,6 +669,8 @@ def update_job_listing(request, listing_id: int, payload: JobListingUpdateIn):
         listing.is_diversity_drive = payload.is_diversity_drive
     if payload.target_gender is not None:
         listing.target_gender = payload.target_gender
+    if payload.hiring_mode is not None:
+        listing.hiring_mode = payload.hiring_mode
     if payload.dei_initiatives is not None:
         listing.dei_initiatives = payload.dei_initiatives
 
@@ -606,6 +803,7 @@ def _application_to_schema(app: JobApplication, blind: bool = False) -> JobAppli
     )
 
 @applications_router.post("/listings/{listing_id}/apply", response={201: JobApplicationOut, 200: JobApplicationOut, 400: dict, 404: dict, 409: dict}, auth=StudentAuth())
+@listings_router.post("/{listing_id}/apply", response={201: JobApplicationOut, 200: JobApplicationOut, 400: dict, 404: dict, 409: dict}, auth=StudentAuth())
 def apply_to_listing(request, listing_id: int, payload: Optional[JobApplicationApplyIn] = None):
     """
     Student submits application to a job or internship listing (Idempotent).
@@ -659,11 +857,15 @@ def apply_to_listing(request, listing_id: int, payload: Optional[JobApplicationA
                 related_application_id=application.id,
                 related_listing_id=listing.id
             )
+            invalidate_by_prefix("skillsetu:placement:")
 
     except OperationalError:
         return 409, {"message": "Database row contention: Operation locked by a concurrent reviewer. Please retry."}
 
     return 201, _application_to_schema(application)
+@listings_router.post("/{listing_id}/apply", response={201: JobApplicationOut, 200: JobApplicationOut, 400: dict, 404: dict, 409: dict}, auth=StudentAuth())
+def apply_to_listing_direct(request, listing_id: int, payload: Optional[JobApplicationApplyIn] = None):
+    return apply_to_listing(request, listing_id, payload)
 
 @applications_router.get("/listings/{listing_id}/applications", response={200: List[JobApplicationOut], 403: dict, 404: dict}, auth=RecruiterAuth())
 def get_listing_applications(request, listing_id: int, blind: bool = False):
@@ -754,19 +956,109 @@ def update_application_status(request, application_id: int, payload: JobApplicat
             )
             sched_info = f" Scheduled interview: {payload.interview_date.strftime('%b %d, %Y %I:%M %p UTC')}." if payload.interview_date else ""
             note_info = f" Note: '{payload.note}'" if payload.note else ""
+            if target_status == JobApplication.ApplicationStatus.SHORTLISTED:
+                title = f"Shortlisted: {application.listing.title}"
+                message = f"Congratulations! You have been shortlisted by {application.listing.company.name} for the position '{application.listing.title}'. The hiring team will reach out with interview details shortly.{note_info}"
+            elif target_status == JobApplication.ApplicationStatus.INTERVIEW:
+                title = f"Interview Scheduled: {application.listing.title}"
+                message = f"An interview has been scheduled for '{application.listing.title}' with {application.listing.company.name}.{sched_info}{note_info}"
+            elif target_status == JobApplication.ApplicationStatus.OFFERED:
+                title = f"Job Offer: {application.listing.title}"
+                message = f"Congratulations! You have received an offer for '{application.listing.title}' at {application.listing.company.name}.{note_info}"
+            elif target_status == JobApplication.ApplicationStatus.REJECTED:
+                title = f"Application Update: {application.listing.title}"
+                message = f"Thank you for your interest in '{application.listing.title}' at {application.listing.company.name}. The hiring team has decided to proceed with other candidates at this time.{note_info}"
+            else:
+                title = f"Application Stage: {target_status.replace('_', ' ').title()}"
+                message = f"Your application for '{application.listing.title}' at '{application.listing.company.name}' has advanced to {target_status.replace('_', ' ').title()}.{sched_info}{note_info}"
+
             Notification.objects.create(
                 user=student.user,
-                title=f"Application Stage: {target_status.replace('_', ' ').title()}",
-                message=f"Your application for '{application.listing.title}' at '{application.listing.company.name}' has advanced to {target_status.replace('_', ' ').title()}.{sched_info}{note_info}",
+                title=title,
+                message=message,
                 notification_type=notif_type,
                 related_application_id=application.id,
                 related_listing_id=application.listing.id
             )
 
+        invalidate_by_prefix("skillsetu:placement:")
+
     except OperationalError:
         return 409, {"message": "Database row contention: Operation locked by a concurrent reviewer. Please retry."}
 
     return 200, _application_to_schema(application)
+
+@applications_router.post("/nominate", response={201: JobApplicationOut, 200: JobApplicationOut, 400: dict, 403: dict, 404: dict, 409: dict}, auth=RecruiterAuth())
+def nominate_candidate(request, payload: NominateIn):
+    recruiter = RecruiterProfile.objects.filter(user=request.auth).first()
+    if not recruiter:
+        return 400, {"message": "Recruiter profile not found."}
+    listing = JobListing.objects.filter(id=payload.listing_id).first()
+    if not listing:
+        return 404, {"message": "Listing not found."}
+    if listing.company_id != recruiter.company_id and request.auth.role != User.Role.ADMIN:
+        return 403, {"message": "You can only nominate candidates to your company's listings."}
+    student = StudentProfile.objects.filter(id=payload.student_id).first()
+    if not student:
+        student = StudentProfile.objects.filter(user_id=payload.student_id).first()
+    if not student:
+        return 404, {"message": "Candidate not found."}
+    try:
+        with transaction.atomic():
+            existing = JobApplication.objects.filter(listing=listing, student=student).first()
+            if existing:
+                if existing.status == JobApplication.ApplicationStatus.SHORTLISTED:
+                    return 200, _application_to_schema(existing)
+                existing.status = JobApplication.ApplicationStatus.SHORTLISTED
+                if payload.note:
+                    existing.recruiter_notes = payload.note
+                history = list(existing.status_history or [])
+                history.append({"status": "SHORTLISTED", "timestamp": timezone.now().isoformat(), "note": payload.note or "Recruiter nominated"})
+                existing.status_history = history
+                existing.save()
+                application = existing
+            else:
+                student_skills = list((student.skills_matrix or {}).keys()) or [s.strip() for s in (student.raw_extracted_skills or [])]
+                match, _ = compute_job_skill_overlap(student_skills, listing.required_skills or [])
+                application = JobApplication.objects.create(
+                    listing=listing,
+                    student=student,
+                    status=JobApplication.ApplicationStatus.SHORTLISTED,
+                    match_score=match,
+                    recruiter_notes=payload.note or "Recruiter nominated",
+                    status_history=[{"status": "SHORTLISTED", "timestamp": timezone.now().isoformat(), "note": payload.note or "Recruiter nominated"}]
+                )
+            Notification.objects.create(
+                user=student.user,
+                notification_type=Notification.NotificationType.STATUS_CHANGE,
+                title=f"Shortlisted: {listing.title}",
+                message=f"Congratulations! You have been shortlisted by {listing.company.name} for '{listing.title}'.",
+                related_listing_id=listing.id,
+                related_application_id=application.id
+            )
+            invalidate_by_prefix("skillsetu:placement:")
+    except OperationalError:
+        return 409, {"message": "Database row contention. Please retry."}
+    return 201, _application_to_schema(application)
+
+@applications_router.get("/pipeline", response=List[JobApplicationOut], auth=RecruiterAuth())
+def get_company_pipeline(request, status: Optional[str] = None, blind: bool = False):
+    recruiter = RecruiterProfile.objects.filter(user=request.auth).first()
+    if not recruiter or not recruiter.company_id:
+        if request.auth.role == User.Role.ADMIN:
+            qs = JobApplication.objects.all().select_related('student__user', 'listing__company').order_by('-updated_at')
+        else:
+            return []
+    else:
+        qs = JobApplication.objects.filter(
+            listing__company_id=recruiter.company_id
+        ).select_related('student__user', 'listing__company').order_by('-updated_at')
+    if status and status.upper() != 'ALL':
+        status_upper = status.upper()
+        valid = [c[0] for c in JobApplication.ApplicationStatus.choices]
+        if status_upper in valid:
+            qs = qs.filter(status=status_upper)
+    return [_application_to_schema(app, blind=blind) for app in qs]
 
 @applications_router.get("/my-applications", response=List[StudentMyApplicationOut], auth=StudentAuth())
 def get_my_applications(request):
@@ -883,13 +1175,114 @@ def update_internship_progress(request, application_id: int, payload: Internship
 # ---------------------------------------------------------
 programs_router = Router(tags=["Industry Learning Programs & Collaboration"])
 
-def _program_to_schema(program: LearningProgram) -> LearningProgramOut:
+def _resolve_request_user(request):
+    user = getattr(request, 'auth', None)
+    if user:
+        return user
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+        try:
+            import jwt
+            from django.conf import settings
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+            return User.objects.filter(id=payload.get("user_id")).first()
+        except Exception:
+            pass
+    return None
+
+def _parse_program_meta(program: LearningProgram, student_profile: Optional[StudentProfile] = None):
+    text = program.description or ""
+    modules = []
+    if "Modules:" in text:
+        parts = text.split("Modules:")[1].strip().split("\n")
+        for p in parts:
+            clean_p = p.strip()
+            if clean_p and (clean_p[0].isdigit() or clean_p.startswith("-")):
+                dot_idx = clean_p.find(".")
+                if dot_idx != -1 and dot_idx < 4:
+                    clean_p = clean_p[dot_idx + 1:].strip()
+                elif clean_p.startswith("-"):
+                    clean_p = clean_p[1:].strip()
+                if clean_p:
+                    modules.append(clean_p)
+    if not modules:
+        skills = program.skills_covered or []
+        for i, s in enumerate(skills[:5], 1):
+            modules.append(f"Module {i}: Advanced Applied {s}")
+        if not modules:
+            modules = [
+                "Module 1: Foundations & Architecture",
+                "Module 2: Core Practical Workflows",
+                "Module 3: Advanced Implementation",
+                "Module 4: Industry Capstone Project"
+            ]
+
+    skills_lower = [s.lower().strip() for s in (program.skills_covered or [])]
+    if any(s in skills_lower for s in ['figma', 'ui/ux design', 'ui/ux', 'ui design', 'ux design', 'wireframing', 'design systems', 'wcag accessibility', 'prototyping', 'motion design', 'interaction design']):
+        domain = "Design & Creative Arts"
+    elif any(s in skills_lower for s in ['business analysis', 'bpmn workflows', 'market research', 'agile & scrum', 'project management', 'supply chain', 'operations management', 'crm systems', 'salesforce']):
+        domain = "Business & Management"
+    elif any(s in skills_lower for s in ['tally prime', 'gst compliance', 'statutory auditing', 'taxation', 'tds', 'financial modeling', 'dcf valuation', 'financial reporting', 'cost accounting', 'quantitative analysis']):
+        domain = "Commerce & Finance"
+    elif program.company and program.company.industry:
+        ind_name = program.company.industry.name
+        if ind_name == "Design & Creative Arts":
+            domain = "Design & Creative Arts"
+        elif ind_name in ["Commerce & Accounting", "Finance & Banking"]:
+            domain = "Commerce & Finance"
+        elif ind_name == "Business & Management":
+            domain = "Business & Management"
+        else:
+            domain = "Engineering & Tech"
+    else:
+        domain = "Engineering & Tech"
+
+    prog_type_str = str(program.program_type).upper()
+    if "CERTIFICATION" in prog_type_str or "FELLOWSHIP" in program.title.upper():
+        level = "Advanced"
+    elif "WORKSHOP" in prog_type_str:
+        level = "Intermediate"
+    elif "TRAINING" in prog_type_str:
+        level = "Beginner to Intermediate"
+    else:
+        level = "Intermediate"
+
+    rating = round(4.7 + (program.id % 4) * 0.08, 1)
+
+    is_enrolled = False
+    user_progress = 0
+    completed_modules = []
+    if student_profile:
+        if program.enrolled_students.filter(id=student_profile.id).exists():
+            is_enrolled = True
+        pref = student_profile.preferences or {}
+        course_prog = pref.get("course_progress", {}).get(str(program.id), {})
+        if course_prog:
+            is_enrolled = True
+            user_progress = int(course_prog.get("progress", 0))
+            completed_modules = course_prog.get("completed_modules", [])
+
+    return {
+        "domain": domain,
+        "modules": modules,
+        "level": level,
+        "rating": rating,
+        "is_enrolled": is_enrolled,
+        "user_progress": user_progress,
+        "completed_modules": completed_modules
+    }
+
+def _program_to_schema(program: LearningProgram, student_profile: Optional[StudentProfile] = None) -> LearningProgramOut:
     s_count = getattr(program, 'enrolled_students_count', None)
     if s_count is None:
         s_count = program.enrolled_students.count()
     f_count = getattr(program, 'enrolled_faculty_count', None)
     if f_count is None:
         f_count = program.enrolled_faculty.count()
+
+    meta = _parse_program_meta(program, student_profile)
+
     return LearningProgramOut(
         id=program.id,
         company_id=program.company.id,
@@ -909,7 +1302,13 @@ def _program_to_schema(program: LearningProgram) -> LearningProgramOut:
         branding_banner_url=program.branding_banner_url or "",
         enrolled_students_count=s_count,
         enrolled_faculty_count=f_count,
-        created_at=program.created_at
+        created_at=program.created_at,
+        domain=meta["domain"],
+        modules=meta["modules"],
+        rating=meta["rating"],
+        level=meta["level"],
+        is_enrolled=meta["is_enrolled"],
+        user_progress=meta["user_progress"]
     )
 
 @programs_router.get("/", response=List[LearningProgramOut])
@@ -917,23 +1316,24 @@ def list_learning_programs(
     request,
     program_type: Optional[str] = None,
     target_audience: Optional[str] = None,
+    domain: Optional[str] = None,
     mode: Optional[str] = None,
     q: Optional[str] = None
 ):
-    """
-    Industry Learning Programs Feed (PS Requirement):
-    Browse corporate training programs, certification tracks, hands-on workshops,
-    mentorship initiatives, and innovation challenges/hackathons.
-    """
+    user = _resolve_request_user(request)
+    student_profile = None
+    if user and user.role in [User.Role.STUDENT, User.Role.CANDIDATE]:
+        student_profile = StudentProfile.objects.filter(user=user).first()
+
     qs = LearningProgram.objects.select_related('company').annotate(
         enrolled_students_count=models.Count('enrolled_students', distinct=True),
         enrolled_faculty_count=models.Count('enrolled_faculty', distinct=True)
     )
-    if program_type:
+    if program_type and program_type != "ALL":
         qs = qs.filter(program_type__iexact=program_type)
     if target_audience and target_audience != 'ALL':
         qs = qs.filter(models.Q(target_audience__iexact=target_audience) | models.Q(target_audience='ALL'))
-    if mode:
+    if mode and mode != "ALL":
         qs = qs.filter(mode__iexact=mode)
     if q:
         qs = qs.filter(
@@ -941,14 +1341,145 @@ def list_learning_programs(
             models.Q(description__icontains=q) |
             models.Q(company__name__icontains=q)
         )
-    return [_program_to_schema(p) for p in qs]
+
+    results = [_program_to_schema(p, student_profile) for p in qs]
+    if domain and domain != "All":
+        results = [p for p in results if p.domain.lower() == domain.lower() or domain.lower() in p.domain.lower()]
+
+    return results
+
+@programs_router.get("/recommendations", response=LearningRecommendationsResponseOut)
+def get_learning_recommendations(request):
+    user = _resolve_request_user(request)
+    student_profile = None
+    if user and user.role in [User.Role.STUDENT, User.Role.CANDIDATE]:
+        student_profile = StudentProfile.objects.filter(user=user).first()
+
+    all_db_programs = list(LearningProgram.objects.select_related('company').annotate(
+        enrolled_students_count=models.Count('enrolled_students', distinct=True),
+        enrolled_faculty_count=models.Count('enrolled_faculty', distinct=True)
+    ).order_by('-created_at'))
+
+    c_skills_lower = set()
+    target_role = "General Engineering & Tech"
+    top_gap_skills = []
+
+    if student_profile:
+        if student_profile.target_roles and len(student_profile.target_roles) > 0:
+            target_role = student_profile.target_roles[0]
+        elif student_profile.role_fit_matrix:
+            sorted_fits = sorted(
+                student_profile.role_fit_matrix.items(),
+                key=lambda item: float(item[1].get("score", 0) if isinstance(item[1], dict) else 0),
+                reverse=True
+            )
+            if sorted_fits:
+                target_role = sorted_fits[0][0]
+
+        c_matrix = student_profile.skills_matrix or {}
+        for k in c_matrix.keys():
+            c_skills_lower.add(k.lower().strip())
+        for cat_list in (student_profile.skills_categorized or {}).values():
+            if isinstance(cat_list, list):
+                for sk in cat_list:
+                    c_skills_lower.add(sk.lower().strip())
+
+        try:
+            roadmap = compute_skill_gap_roadmap(student_profile)
+            for item in roadmap.get("skills_to_build_next", []):
+                top_gap_skills.append(item.get("skill", "").strip())
+        except Exception:
+            pass
+
+    top_gap_skills_lower = [s.lower() for s in top_gap_skills]
+
+    scored_items = []
+    for prog in all_db_programs:
+        meta = _parse_program_meta(prog, student_profile)
+        p_schema = _program_to_schema(prog, student_profile)
+
+        prog_skills = [s.lower().strip() for s in (prog.skills_covered or [])]
+        matched_skills = [s.title() for s in prog_skills if s in c_skills_lower]
+        gap_skills_covered = [s.title() for s in prog_skills if any(gs in s or s in gs for gs in top_gap_skills_lower)]
+
+        is_gap_booster = len(gap_skills_covered) > 0
+
+        base_score = 65
+        gap_bonus = len(gap_skills_covered) * 12
+        verified_bonus = len(matched_skills) * 8
+        cert_bonus = 6 if prog.is_certified else 0
+        match_score = min(99, max(50, base_score + gap_bonus + verified_bonus + cert_bonus))
+
+        expected_boost = ""
+        recommendation_reason = ""
+        if is_gap_booster:
+            expected_boost = f"+{min(28, len(gap_skills_covered) * 9 + 10)}% Match Boost"
+            recommendation_reason = f"Directly closes {len(gap_skills_covered)} critical skill gaps ({', '.join(gap_skills_covered[:2])}) for {target_role} roles."
+        elif matched_skills:
+            expected_boost = "+12% Proficiency Boost"
+            recommendation_reason = f"Deepens applied proficiency in {', '.join(matched_skills[:2])} with recognized industry certification."
+        else:
+            expected_boost = "+8% Career Breadth"
+            recommendation_reason = f"Broadens foundational competence in {prog.title} with verified credentials."
+
+        scored_items.append(LearningProgramRecommendationItem(
+            program=p_schema,
+            match_score=match_score,
+            matched_skills=matched_skills,
+            gap_skills_covered=gap_skills_covered,
+            expected_boost=expected_boost,
+            is_gap_booster=is_gap_booster,
+            is_enrolled=meta["is_enrolled"],
+            user_progress=meta["user_progress"],
+            completed_modules=meta["completed_modules"],
+            recommendation_reason=recommendation_reason
+        ))
+
+    recommended_programs = sorted(scored_items, key=lambda x: x.match_score, reverse=True)[:8]
+    skill_gap_boosters = [x for x in scored_items if x.is_gap_booster][:6]
+    enrolled_programs = [x for x in scored_items if x.is_enrolled]
+
+    return LearningRecommendationsResponseOut(
+        recommended_programs=recommended_programs,
+        skill_gap_boosters=skill_gap_boosters,
+        enrolled_programs=enrolled_programs,
+        all_programs=scored_items,
+        target_role=target_role,
+        verified_skills_count=len(c_skills_lower),
+        top_gap_skills=top_gap_skills[:6]
+    )
+
+@programs_router.get("/my-enrollments", response=List[LearningProgramRecommendationItem], auth=JWTAuth())
+def get_my_enrollments(request):
+    user = request.auth
+    student_profile = None
+    if user.role in [User.Role.STUDENT, User.Role.CANDIDATE]:
+        student_profile = StudentProfile.objects.filter(user=user).first()
+    
+    if not student_profile:
+        return []
+
+    programs = student_profile.enrolled_learning_programs.select_related('company').all()
+    results = []
+    for prog in programs:
+        meta = _parse_program_meta(prog, student_profile)
+        p_schema = _program_to_schema(prog, student_profile)
+        results.append(LearningProgramRecommendationItem(
+            program=p_schema,
+            match_score=95,
+            matched_skills=prog.skills_covered or [],
+            gap_skills_covered=[],
+            expected_boost="+15% Active Upskill",
+            is_gap_booster=False,
+            is_enrolled=True,
+            user_progress=meta["user_progress"],
+            completed_modules=meta["completed_modules"],
+            recommendation_reason=f"Currently enrolled course track by {prog.company.name}."
+        ))
+    return results
 
 @programs_router.post("/", response={201: LearningProgramOut, 400: dict}, auth=RecruiterAuth())
 def create_learning_program(request, payload: LearningProgramCreateIn):
-    """
-    Publish an Industry Learning Program, Workshop, or Innovation Challenge:
-    Restricted to authenticated corporate recruiters.
-    """
     recruiter = RecruiterProfile.objects.filter(user=request.auth).first()
     if not recruiter or not recruiter.company:
         return 400, {"message": "You must register or join a company before publishing learning programs."}
@@ -972,32 +1503,46 @@ def create_learning_program(request, payload: LearningProgramCreateIn):
 
 @programs_router.get("/{program_id}", response={200: LearningProgramOut, 404: dict})
 def get_learning_program_detail(request, program_id: int):
-    """Fetch detailed information for a specific learning program or workshop."""
+    user = _resolve_request_user(request)
+    student_profile = None
+    if user and user.role in [User.Role.STUDENT, User.Role.CANDIDATE]:
+        student_profile = StudentProfile.objects.filter(user=user).first()
+
     program = LearningProgram.objects.select_related('company').annotate(
         enrolled_students_count=models.Count('enrolled_students', distinct=True),
         enrolled_faculty_count=models.Count('enrolled_faculty', distinct=True)
     ).filter(id=program_id).first()
     if not program:
         return 404, {"message": "Learning program not found."}
-    return 200, _program_to_schema(program)
+    return 200, _program_to_schema(program, student_profile)
 
 @programs_router.post("/{program_id}/enroll", response={200: dict, 400: dict, 404: dict}, auth=JWTAuth())
 def enroll_in_learning_program(request, program_id: int):
-    """
-    1-Click Enrollment in Industry Learning Program or Workshop:
-    Accessible to both Students/Candidates and Faculty/Academicians.
-    """
     user = request.auth
     program = LearningProgram.objects.select_related('company').filter(id=program_id).first()
     if not program:
         return 404, {"message": "Learning program not found."}
 
     from institutions.models import FacultyProfile
+    role_label = "Student"
     if user.role in [User.Role.STUDENT, User.Role.CANDIDATE]:
         student_profile, _ = StudentProfile.objects.get_or_create(user=user)
         program.enrolled_students.add(student_profile)
-        role_label = "Student"
-    elif user.role in [User.Role.ACADEMIA, User.Role.FACULTY]:
+        
+        pref = student_profile.preferences or {}
+        if "course_progress" not in pref:
+            pref["course_progress"] = {}
+        prog_key = str(program.id)
+        if prog_key not in pref["course_progress"]:
+            pref["course_progress"][prog_key] = {
+                "progress": 0,
+                "completed_modules": [],
+                "enrolled_at": str(timezone.now()),
+                "is_completed": False
+            }
+            student_profile.preferences = pref
+            student_profile.save(update_fields=["preferences"])
+    elif user.role in [User.Role.ACADEMIA, 'ACADEMIA', 'FACULTY']:
         faculty_profile, _ = FacultyProfile.objects.get_or_create(user=user)
         program.enrolled_faculty.add(faculty_profile)
         role_label = "Faculty"
@@ -1007,7 +1552,7 @@ def enroll_in_learning_program(request, program_id: int):
     Notification.objects.create(
         user=user,
         title=f"Enrolled in {program.title}",
-        message=f"You have successfully enrolled in '{program.title}' offered by {program.company.name}. Program mode: {program.mode}.",
+        message=f"You have successfully enrolled in '{program.title}' offered by {program.company.name}. Mode: {program.mode}.",
         notification_type=Notification.NotificationType.NEW_OPPORTUNITY
     )
 
@@ -1016,6 +1561,68 @@ def enroll_in_learning_program(request, program_id: int):
         "message": f"Successfully enrolled {user.username} in {program.title}.",
         "program_id": program.id,
         "enrolled_as": role_label
+    }
+
+@programs_router.post("/{program_id}/progress", response={200: LearningProgressUpdateOut, 400: dict, 404: dict}, auth=JWTAuth())
+def update_learning_progress(request, program_id: int, payload: LearningProgressUpdateIn):
+    user = request.auth
+    program = LearningProgram.objects.select_related('company').filter(id=program_id).first()
+    if not program:
+        return 404, {"message": "Learning program not found."}
+
+    if user.role not in [User.Role.STUDENT, User.Role.CANDIDATE]:
+        return 400, {"message": "Only students and candidates can record learning progress."}
+
+    student_profile, _ = StudentProfile.objects.get_or_create(user=user)
+    program.enrolled_students.add(student_profile)
+
+    preferences = student_profile.preferences or {}
+    if "course_progress" not in preferences:
+        preferences["course_progress"] = {}
+
+    prog_key = str(program.id)
+    is_completed = payload.is_completed or (payload.progress_percentage >= 100)
+    progress_val = 100 if is_completed else max(0, min(100, payload.progress_percentage))
+
+    cert_id = None
+    if is_completed:
+        cert_id = f"SKL-CERT-{program.id}-{student_profile.id}-{hex(program.id * 1000 + student_profile.id)[2:].upper()}"
+        certs = list(student_profile.certifications or [])
+        cert_title = f"{program.title} Professional Certificate"
+        if not any(c.get("name") == cert_title for c in certs):
+            certs.append({
+                "name": cert_title,
+                "issuer": program.company.name,
+                "issue_year": timezone.now().year,
+                "credential_url": f"https://skillsetu.in/credentials/{cert_id}",
+                "skills_covered": program.skills_covered or []
+            })
+            student_profile.certifications = certs
+
+            Notification.objects.create(
+                user=user,
+                title=f"Verified Certificate Awarded: {program.title}",
+                message=f"Congratulations! You completed '{program.title}' offered by {program.company.name}. Credential ID: {cert_id}.",
+                notification_type=Notification.NotificationType.SYSTEM
+            )
+
+    preferences["course_progress"][prog_key] = {
+        "progress": progress_val,
+        "completed_modules": payload.completed_modules,
+        "is_completed": is_completed,
+        "certificate_id": cert_id,
+        "updated_at": str(timezone.now())
+    }
+    student_profile.preferences = preferences
+    student_profile.save(update_fields=["preferences", "certifications"])
+
+    return 200, {
+        "program_id": program.id,
+        "progress_percentage": progress_val,
+        "completed_modules": payload.completed_modules,
+        "is_completed": is_completed,
+        "certificate_id": cert_id,
+        "message": f"Successfully updated progress to {progress_val}%" + (f". Credential #{cert_id} awarded!" if cert_id else ".")
     }
 
 

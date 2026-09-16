@@ -8,6 +8,8 @@ class UserRegisterSchema(Schema):
     password: str = Field(..., min_length=8)
     role: str = Field(..., description="STUDENT, RECRUITER, ACADEMIA, or ADMIN")
     phone_number: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
 
 class UserLoginSchema(Schema):
     username: str
@@ -19,8 +21,20 @@ class UserProfileOutSchema(Schema):
     email: str
     role: str
     auth_provider: str = "LOCAL"
+    is_email_verified: bool = False
     avatar_url: Optional[str] = None
     phone_number: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    access_token: Optional[str] = None
+
+class UserProfileUpdateInSchema(Schema):
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    phone_number: Optional[str] = None
+
 
 # --- OAUTH2 SSO SCHEMAS ---
 
@@ -43,3 +57,24 @@ class OAuthAuthResponseOut(Schema):
     is_new_user: bool
     auth_provider: str
     message: str
+
+# --- PASSWORD RESET SCHEMAS ---
+
+class ForgotPasswordInSchema(Schema):
+    email: EmailStr
+
+class VerifyOtpAndResetInSchema(Schema):
+    email: EmailStr
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit verification code")
+    new_password: str = Field(..., min_length=8, description="New account password (min 8 characters)")
+
+# --- EMAIL VERIFICATION SCHEMAS ---
+
+class VerifyEmailInSchema(Schema):
+    email: Optional[EmailStr] = None
+    otp: Optional[str] = Field(None, min_length=6, max_length=6)
+    token: Optional[str] = None
+
+class ResendVerificationInSchema(Schema):
+    email: EmailStr
+
