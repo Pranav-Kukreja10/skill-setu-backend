@@ -112,6 +112,17 @@ DATABASES = {
     }
 }
 
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'skillsetu-cache-engine',
+        'TIMEOUT': int(os.getenv('CACHE_DEFAULT_TIMEOUT', '300')),
+        'OPTIONS': {
+            'MAX_ENTRIES': int(os.getenv('CACHE_MAX_ENTRIES', '5000'))
+        }
+    }
+}
+
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 

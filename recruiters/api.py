@@ -1,6 +1,7 @@
 from ninja import Router, Query
 from typing import List, Optional
 from datetime import datetime
+from django.utils import timezone
 from django.db import transaction, models, OperationalError
 from django.shortcuts import get_object_or_404
 
@@ -11,11 +12,11 @@ from students.services import compute_profile_strength
 from recruiters.models import Company, RecruiterProfile, JobListing, JobApplication, LearningProgram
 from recruiters.schemas import (
     CompanyCreateIn, CompanyUpdateIn, CompanyOut,
-    RecruiterProfileUpdateIn, RecruiterProfileOut,
+    RecruiterProfileUpdateIn, RecruiterProfileOut, RecruiterPublicProfileOut,
     RecruiterSettingsOutSchema, RecruiterSettingsUpdateIn,
     JobListingCreateIn, JobListingUpdateIn, JobListingOut,
     CandidateJobSearchIn, CandidateJobSearchResponseOut, CandidateJobSearchResultOut,
-    JobApplicationApplyIn, JobApplicationStatusUpdateIn, JobApplicationOut, StudentMyApplicationOut,
+    JobApplicationApplyIn, JobApplicationStatusUpdateIn, NominateIn, JobApplicationOut, StudentMyApplicationOut,
     ApplicantStudentOut, InternshipProgressUpdateIn, InternshipMilestoneLogIn,
     LearningProgramOut, LearningProgramCreateIn,
     LearningProgressUpdateIn, LearningProgressUpdateOut,
@@ -26,6 +27,7 @@ from recruiters.schemas import (
 )
 from students.recommendations import compute_skill_gap_roadmap
 from recruiters.search import index_job_listing, rank_job_listings, compute_job_skill_overlap
+from skillsetu_backend.cache_utils import get_cached, set_cached, generate_cache_key, invalidate_by_prefix, invalidate_cache_keys
 
 # ---------------------------------------------------------
 # ROUTER 1: RECRUITER & COMPANY PROFILE MANAGEMENT
@@ -84,6 +86,12 @@ def get_my_recruiter_profile(request):
         designation=recruiter.designation,
         department=recruiter.department,
         contact_phone=recruiter.contact_phone,
+        bio=recruiter.bio or "",
+        linkedin_url=recruiter.linkedin_url or "",
+        website=recruiter.website or "",
+        location=recruiter.location or "",
+        experience_years=recruiter.experience_years or 0.0,
+        hiring_mode_preference=recruiter.hiring_mode_preference or "COMPANY",
         is_company_admin=recruiter.is_company_admin,
         company=comp_out,
         preferences=recruiter.get_preferences(),
@@ -92,7 +100,7 @@ def get_my_recruiter_profile(request):
 
 @recruiters_router.put("/me", response={200: RecruiterProfileOut, 400: dict})
 def update_my_recruiter_profile(request, payload: RecruiterProfileUpdateIn):
-    """Update recruiter's designation, department, or contact phone."""
+    """Update recruiter's designation, department, contact phone, bio, hiring preference, and socials."""
     recruiter, _ = RecruiterProfile.objects.get_or_create(
         user=request.auth,
         defaults={"designation": "Talent Acquisition Specialist", "is_company_admin": True}
@@ -103,9 +111,137 @@ def update_my_recruiter_profile(request, payload: RecruiterProfileUpdateIn):
         recruiter.department = payload.department
     if payload.contact_phone is not None:
         recruiter.contact_phone = payload.contact_phone
+    if payload.bio is not None:
+        recruiter.bio = payload.bio
+    if payload.linkedin_url is not None:
+        recruiter.linkedin_url = payload.linkedin_url
+    if payload.website is not None:
+        recruiter.website = payload.website
+    if payload.location is not None:
+        recruiter.location = payload.location
+    if payload.experience_years is not None:
+        recruiter.experience_years = payload.experience_years
+    if payload.hiring_mode_preference is not None:
+        recruiter.hiring_mode_preference = payload.hiring_mode_preference
     recruiter.save()
 
     return get_my_recruiter_profile(request)
+
+@recruiters_router.get("/{recruiter_id}/public-profile", response={200: RecruiterPublicProfileOut, 404: dict}, auth=None)
+def get_recruiter_public_profile(request, recruiter_id: int):
+    """
+    Public candidate-facing endpoint to view a recruiter's identity, company affiliation,
+    bio, hiring statistics, and active published job listings.
+    """
+    recruiter = RecruiterProfile.objects.filter(id=recruiter_id).select_related('company', 'user').first()
+    if not recruiter:
+        return 404, {"message": "Recruiter profile not found."}
+
+    user = recruiter.user
+    full_name = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip() or user.username
+
+    comp_out = None
+    if recruiter.company:
+        c = recruiter.company
+        comp_out = CompanyOut(
+            id=c.id,
+            name=c.name,
+            registration_number=c.registration_number,
+            is_verified=c.is_verified,
+            website=c.website,
+            industry_id=c.industry_id,
+            industry_name=c.industry.name if c.industry else None,
+            branding_logo_url=c.branding_logo_url,
+            description=c.description,
+            headquarters=c.headquarters,
+            created_at=c.created_at
+        )
+
+    active_jobs_qs = JobListing.objects.filter(
+        recruiter=recruiter,
+        status=JobListing.ListingStatus.PUBLISHED
+    ).select_related('company', 'recruiter__user')
+
+    if not active_jobs_qs.exists() and recruiter.company_id:
+        active_jobs_qs = JobListing.objects.filter(
+            company_id=recruiter.company_id,
+            status=JobListing.ListingStatus.PUBLISHED
+        ).select_related('company', 'recruiter__user')
+
+    active_jobs = [_listing_to_schema(j) for j in active_jobs_qs]
+    total_placements = JobApplication.objects.filter(
+        listing__recruiter=recruiter,
+        status=JobApplication.ApplicationStatus.OFFERED
+    ).count()
+
+    return 200, RecruiterPublicProfileOut(
+        id=recruiter.id,
+        user_id=user.id,
+        username=user.username,
+        name=full_name,
+        first_name=getattr(user, 'first_name', '') or '',
+        last_name=getattr(user, 'last_name', '') or '',
+        avatar_url=getattr(user, 'avatar_url', None),
+        designation=recruiter.designation or "Talent Partner",
+        department=recruiter.department or "",
+        bio=recruiter.bio or "",
+        linkedin_url=recruiter.linkedin_url or "",
+        website=recruiter.website or "",
+        location=recruiter.location or "",
+        experience_years=recruiter.experience_years or 0.0,
+        hiring_mode_preference=recruiter.hiring_mode_preference or "COMPANY",
+        is_verified=True,
+        company=comp_out,
+        active_jobs=active_jobs,
+        total_openings=len(active_jobs),
+        total_placements=total_placements,
+        created_at=recruiter.created_at
+    )
+
+@recruiters_router.get("/companies/{company_id}/public-profile", response={200: dict, 404: dict}, auth=None)
+def get_company_public_profile(request, company_id: int):
+    """
+    Public candidate-facing endpoint to inspect a partner company's public identity,
+    verified badge, headquarters, recruiters, and active published postings.
+    """
+    company = Company.objects.filter(id=company_id).select_related('industry').first()
+    if not company:
+        return 404, {"message": "Company not found."}
+
+    active_jobs_qs = JobListing.objects.filter(
+        company=company,
+        status=JobListing.ListingStatus.PUBLISHED
+    ).select_related('company', 'recruiter__user')
+
+    active_jobs = [_listing_to_schema(j) for j in active_jobs_qs]
+
+    recruiters_qs = RecruiterProfile.objects.filter(company=company).select_related('user')
+    team_members = []
+    for r in recruiters_qs:
+        u = r.user
+        team_members.append({
+            "id": r.id,
+            "name": f"{getattr(u, 'first_name', '')} {getattr(u, 'last_name', '')}".strip() or u.username,
+            "designation": r.designation,
+            "avatar_url": getattr(u, 'avatar_url', None),
+            "linkedin_url": r.linkedin_url
+        })
+
+    return 200, {
+        "id": company.id,
+        "name": company.name,
+        "registration_number": company.registration_number,
+        "is_verified": company.is_verified,
+        "website": company.website,
+        "industry_name": company.industry.name if company.industry else None,
+        "branding_logo_url": company.branding_logo_url,
+        "description": company.description,
+        "headquarters": company.headquarters,
+        "active_jobs": [j.dict() for j in active_jobs],
+        "total_active_jobs": len(active_jobs),
+        "team": team_members,
+        "created_at": company.created_at.isoformat() if company.created_at else None
+    }
 
 @recruiters_router.get("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict})
 def get_my_recruiter_settings(request):
@@ -118,8 +254,8 @@ def get_my_recruiter_settings(request):
     )
     return 200, recruiter.get_preferences()
 
-@recruiters_router.put("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict})
-@recruiters_router.patch("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict})
+@recruiters_router.put("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict}, operation_id="recruiters_update_my_settings_put")
+@recruiters_router.patch("/me/settings", response={200: RecruiterSettingsOutSchema, 400: dict}, operation_id="recruiters_update_my_settings_patch")
 def update_my_recruiter_settings(request, payload: RecruiterSettingsUpdateIn):
     """
     Update recruiter's granular preferences:
@@ -260,15 +396,33 @@ def _listing_to_schema(listing: JobListing) -> JobListingOut:
         apps_count = getattr(listing, 'apps_count', None)
     if apps_count is None and hasattr(listing, 'applications'):
         apps_count = listing.applications.count()
+
+    hiring_mode = getattr(listing, 'hiring_mode', JobListing.HiringMode.COMPANY) or JobListing.HiringMode.COMPANY
+    rec_user = listing.recruiter.user if (listing.recruiter and hasattr(listing.recruiter, 'user')) else None
+    rec_full_name = f"{getattr(rec_user, 'first_name', '')} {getattr(rec_user, 'last_name', '')}".strip() or getattr(rec_user, 'username', '') if rec_user else ""
+    rec_avatar = getattr(rec_user, 'avatar_url', None) or "" if rec_user else ""
+    comp_name = listing.company.name if listing.company else "Partner Company"
+    comp_logo = listing.company.branding_logo_url if listing.company else ""
+
+    if hiring_mode == JobListing.HiringMode.INDIVIDUAL:
+        hiring_display_name = rec_full_name or comp_name
+        hiring_logo_url = rec_avatar or comp_logo
+    else:
+        hiring_display_name = comp_name
+        hiring_logo_url = comp_logo or rec_avatar
+
     return JobListingOut(
         id=listing.id,
-        company_id=listing.company.id,
-        company_name=listing.company.name,
-        company_logo=listing.company.branding_logo_url or "",
-        company_website=listing.company.website or "",
-        company_headquarters=listing.company.headquarters or "",
-        recruiter_id=listing.recruiter.id,
-        recruiter_name=listing.recruiter.user.username,
+        company_id=listing.company.id if listing.company else 0,
+        company_name=comp_name,
+        company_logo=comp_logo,
+        company_website=listing.company.website if listing.company else "",
+        company_headquarters=listing.company.headquarters if listing.company else "",
+        recruiter_id=listing.recruiter.id if listing.recruiter else 0,
+        recruiter_name=rec_full_name,
+        hiring_mode=hiring_mode,
+        hiring_display_name=hiring_display_name,
+        hiring_logo_url=hiring_logo_url,
         title=listing.title,
         role_type=listing.role_type,
         status=listing.status,
@@ -313,7 +467,7 @@ def dispatch_new_opportunity_notifications(listing: JobListing) -> int:
 
     notifications_to_create = []
     for s in students:
-        if s.user_id in already_notified_user_ids:
+        if not s.user or s.user_id in already_notified_user_ids:
             continue
 
         cand_skills = [sk.lower().strip() for sk in (s.skills_matrix or {}).keys()]
@@ -323,9 +477,10 @@ def dispatch_new_opportunity_notifications(listing: JobListing) -> int:
             for tr in (s.target_roles or [])
         )
         if overlap >= 0.25 or title_match:
+            display_name = listing.company.name if listing.hiring_mode == JobListing.HiringMode.COMPANY else listing.hiring_display_name
             notifications_to_create.append(Notification(
                 user=s.user,
-                title=f"New Opportunity: {listing.title} at {listing.company.name}",
+                title=f"New Opportunity: {listing.title} at {display_name}",
                 message=f"A new {listing.role_type.replace('_', ' ').title()} matching your skill profile was just posted: '{listing.title}' ({listing.stipend_or_ctc}, {listing.location}). Apply now!",
                 notification_type=Notification.NotificationType.NEW_OPPORTUNITY,
                 related_listing_id=listing.id
@@ -343,15 +498,29 @@ def create_job_listing(request, payload: JobListingCreateIn):
     Automatically indexes denormalized search_corpus and dense BGE vector.
     Dispatches automated opportunity notifications if published immediately.
     """
-    recruiter = RecruiterProfile.objects.filter(user=request.auth).first()
-    if not recruiter or not recruiter.company:
-        return 400, {"message": "You must register or join a company before creating listings."}
+    recruiter, _ = RecruiterProfile.objects.get_or_create(
+        user=request.auth,
+        defaults={"designation": "Talent Acquisition Specialist", "is_company_admin": True}
+    )
+    if not recruiter.company:
+        company_name = f"{request.auth.first_name or request.auth.username}'s Enterprise" if (request.auth.first_name or request.auth.username) else "Partner Enterprise"
+        company, _ = Company.objects.get_or_create(
+            name=company_name,
+            defaults={
+                "description": "Verified Partner Enterprise",
+                "is_verified": True,
+                "headquarters": "Bengaluru, India"
+            }
+        )
+        recruiter.company = company
+        recruiter.save(update_fields=["company"])
 
     target_status = getattr(payload, 'status', None) or JobListing.ListingStatus.DRAFT
 
     listing = JobListing.objects.create(
         recruiter=recruiter,
         company=recruiter.company,
+        hiring_mode=getattr(payload, 'hiring_mode', None) or JobListing.HiringMode.COMPANY,
         title=payload.title,
         role_type=payload.role_type or JobListing.RoleType.FULL_TIME,
         status=target_status,
@@ -375,6 +544,9 @@ def create_job_listing(request, payload: JobListingCreateIn):
 
     if target_status == JobListing.ListingStatus.PUBLISHED:
         dispatch_new_opportunity_notifications(listing)
+
+    invalidate_by_prefix("skillsetu:placement:")
+    invalidate_by_prefix("skillsetu:jobs_feed:")
 
     return 201, _listing_to_schema(listing)
 
@@ -425,7 +597,7 @@ def candidate_job_search_get(
     )
     return results
 
-@listings_router.get("/", response=List[JobListingOut], auth=JWTAuth())
+@listings_router.get("/", response=List[JobListingOut])
 def list_published_listings(
     request,
     role_type: Optional[str] = None,
@@ -448,7 +620,7 @@ def list_published_listings(
 
     return [_listing_to_schema(l) for l in qs]
 
-@listings_router.get("/{listing_id}", response={200: JobListingOut, 404: dict}, auth=JWTAuth())
+@listings_router.get("/{listing_id}", response={200: JobListingOut, 404: dict})
 def get_job_listing(request, listing_id: int):
     """Fetch full details of a specific job or internship listing."""
     listing = JobListing.objects.filter(id=listing_id).select_related('company', 'recruiter__user').first()
@@ -497,6 +669,8 @@ def update_job_listing(request, listing_id: int, payload: JobListingUpdateIn):
         listing.is_diversity_drive = payload.is_diversity_drive
     if payload.target_gender is not None:
         listing.target_gender = payload.target_gender
+    if payload.hiring_mode is not None:
+        listing.hiring_mode = payload.hiring_mode
     if payload.dei_initiatives is not None:
         listing.dei_initiatives = payload.dei_initiatives
 
@@ -629,6 +803,7 @@ def _application_to_schema(app: JobApplication, blind: bool = False) -> JobAppli
     )
 
 @applications_router.post("/listings/{listing_id}/apply", response={201: JobApplicationOut, 200: JobApplicationOut, 400: dict, 404: dict, 409: dict}, auth=StudentAuth())
+@listings_router.post("/{listing_id}/apply", response={201: JobApplicationOut, 200: JobApplicationOut, 400: dict, 404: dict, 409: dict}, auth=StudentAuth())
 def apply_to_listing(request, listing_id: int, payload: Optional[JobApplicationApplyIn] = None):
     """
     Student submits application to a job or internship listing (Idempotent).
@@ -682,11 +857,15 @@ def apply_to_listing(request, listing_id: int, payload: Optional[JobApplicationA
                 related_application_id=application.id,
                 related_listing_id=listing.id
             )
+            invalidate_by_prefix("skillsetu:placement:")
 
     except OperationalError:
         return 409, {"message": "Database row contention: Operation locked by a concurrent reviewer. Please retry."}
 
     return 201, _application_to_schema(application)
+@listings_router.post("/{listing_id}/apply", response={201: JobApplicationOut, 200: JobApplicationOut, 400: dict, 404: dict, 409: dict}, auth=StudentAuth())
+def apply_to_listing_direct(request, listing_id: int, payload: Optional[JobApplicationApplyIn] = None):
+    return apply_to_listing(request, listing_id, payload)
 
 @applications_router.get("/listings/{listing_id}/applications", response={200: List[JobApplicationOut], 403: dict, 404: dict}, auth=RecruiterAuth())
 def get_listing_applications(request, listing_id: int, blind: bool = False):
@@ -777,19 +956,109 @@ def update_application_status(request, application_id: int, payload: JobApplicat
             )
             sched_info = f" Scheduled interview: {payload.interview_date.strftime('%b %d, %Y %I:%M %p UTC')}." if payload.interview_date else ""
             note_info = f" Note: '{payload.note}'" if payload.note else ""
+            if target_status == JobApplication.ApplicationStatus.SHORTLISTED:
+                title = f"Shortlisted: {application.listing.title}"
+                message = f"Congratulations! You have been shortlisted by {application.listing.company.name} for the position '{application.listing.title}'. The hiring team will reach out with interview details shortly.{note_info}"
+            elif target_status == JobApplication.ApplicationStatus.INTERVIEW:
+                title = f"Interview Scheduled: {application.listing.title}"
+                message = f"An interview has been scheduled for '{application.listing.title}' with {application.listing.company.name}.{sched_info}{note_info}"
+            elif target_status == JobApplication.ApplicationStatus.OFFERED:
+                title = f"Job Offer: {application.listing.title}"
+                message = f"Congratulations! You have received an offer for '{application.listing.title}' at {application.listing.company.name}.{note_info}"
+            elif target_status == JobApplication.ApplicationStatus.REJECTED:
+                title = f"Application Update: {application.listing.title}"
+                message = f"Thank you for your interest in '{application.listing.title}' at {application.listing.company.name}. The hiring team has decided to proceed with other candidates at this time.{note_info}"
+            else:
+                title = f"Application Stage: {target_status.replace('_', ' ').title()}"
+                message = f"Your application for '{application.listing.title}' at '{application.listing.company.name}' has advanced to {target_status.replace('_', ' ').title()}.{sched_info}{note_info}"
+
             Notification.objects.create(
                 user=student.user,
-                title=f"Application Stage: {target_status.replace('_', ' ').title()}",
-                message=f"Your application for '{application.listing.title}' at '{application.listing.company.name}' has advanced to {target_status.replace('_', ' ').title()}.{sched_info}{note_info}",
+                title=title,
+                message=message,
                 notification_type=notif_type,
                 related_application_id=application.id,
                 related_listing_id=application.listing.id
             )
 
+        invalidate_by_prefix("skillsetu:placement:")
+
     except OperationalError:
         return 409, {"message": "Database row contention: Operation locked by a concurrent reviewer. Please retry."}
 
     return 200, _application_to_schema(application)
+
+@applications_router.post("/nominate", response={201: JobApplicationOut, 200: JobApplicationOut, 400: dict, 403: dict, 404: dict, 409: dict}, auth=RecruiterAuth())
+def nominate_candidate(request, payload: NominateIn):
+    recruiter = RecruiterProfile.objects.filter(user=request.auth).first()
+    if not recruiter:
+        return 400, {"message": "Recruiter profile not found."}
+    listing = JobListing.objects.filter(id=payload.listing_id).first()
+    if not listing:
+        return 404, {"message": "Listing not found."}
+    if listing.company_id != recruiter.company_id and request.auth.role != User.Role.ADMIN:
+        return 403, {"message": "You can only nominate candidates to your company's listings."}
+    student = StudentProfile.objects.filter(id=payload.student_id).first()
+    if not student:
+        student = StudentProfile.objects.filter(user_id=payload.student_id).first()
+    if not student:
+        return 404, {"message": "Candidate not found."}
+    try:
+        with transaction.atomic():
+            existing = JobApplication.objects.filter(listing=listing, student=student).first()
+            if existing:
+                if existing.status == JobApplication.ApplicationStatus.SHORTLISTED:
+                    return 200, _application_to_schema(existing)
+                existing.status = JobApplication.ApplicationStatus.SHORTLISTED
+                if payload.note:
+                    existing.recruiter_notes = payload.note
+                history = list(existing.status_history or [])
+                history.append({"status": "SHORTLISTED", "timestamp": timezone.now().isoformat(), "note": payload.note or "Recruiter nominated"})
+                existing.status_history = history
+                existing.save()
+                application = existing
+            else:
+                student_skills = list((student.skills_matrix or {}).keys()) or [s.strip() for s in (student.raw_extracted_skills or [])]
+                match, _ = compute_job_skill_overlap(student_skills, listing.required_skills or [])
+                application = JobApplication.objects.create(
+                    listing=listing,
+                    student=student,
+                    status=JobApplication.ApplicationStatus.SHORTLISTED,
+                    match_score=match,
+                    recruiter_notes=payload.note or "Recruiter nominated",
+                    status_history=[{"status": "SHORTLISTED", "timestamp": timezone.now().isoformat(), "note": payload.note or "Recruiter nominated"}]
+                )
+            Notification.objects.create(
+                user=student.user,
+                notification_type=Notification.NotificationType.STATUS_CHANGE,
+                title=f"Shortlisted: {listing.title}",
+                message=f"Congratulations! You have been shortlisted by {listing.company.name} for '{listing.title}'.",
+                related_listing_id=listing.id,
+                related_application_id=application.id
+            )
+            invalidate_by_prefix("skillsetu:placement:")
+    except OperationalError:
+        return 409, {"message": "Database row contention. Please retry."}
+    return 201, _application_to_schema(application)
+
+@applications_router.get("/pipeline", response=List[JobApplicationOut], auth=RecruiterAuth())
+def get_company_pipeline(request, status: Optional[str] = None, blind: bool = False):
+    recruiter = RecruiterProfile.objects.filter(user=request.auth).first()
+    if not recruiter or not recruiter.company_id:
+        if request.auth.role == User.Role.ADMIN:
+            qs = JobApplication.objects.all().select_related('student__user', 'listing__company').order_by('-updated_at')
+        else:
+            return []
+    else:
+        qs = JobApplication.objects.filter(
+            listing__company_id=recruiter.company_id
+        ).select_related('student__user', 'listing__company').order_by('-updated_at')
+    if status and status.upper() != 'ALL':
+        status_upper = status.upper()
+        valid = [c[0] for c in JobApplication.ApplicationStatus.choices]
+        if status_upper in valid:
+            qs = qs.filter(status=status_upper)
+    return [_application_to_schema(app, blind=blind) for app in qs]
 
 @applications_router.get("/my-applications", response=List[StudentMyApplicationOut], auth=StudentAuth())
 def get_my_applications(request):
@@ -1273,7 +1542,7 @@ def enroll_in_learning_program(request, program_id: int):
             }
             student_profile.preferences = pref
             student_profile.save(update_fields=["preferences"])
-    elif user.role in [User.Role.ACADEMIA, User.Role.FACULTY]:
+    elif user.role in [User.Role.ACADEMIA, 'ACADEMIA', 'FACULTY']:
         faculty_profile, _ = FacultyProfile.objects.get_or_create(user=user)
         program.enrolled_faculty.add(faculty_profile)
         role_label = "Faculty"
@@ -1334,7 +1603,7 @@ def update_learning_progress(request, program_id: int, payload: LearningProgress
                 user=user,
                 title=f"Verified Certificate Awarded: {program.title}",
                 message=f"Congratulations! You completed '{program.title}' offered by {program.company.name}. Credential ID: {cert_id}.",
-                notification_type=Notification.NotificationType.ASSESSMENT_REMINDER
+                notification_type=Notification.NotificationType.SYSTEM
             )
 
     preferences["course_progress"][prog_key] = {

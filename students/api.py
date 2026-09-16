@@ -58,6 +58,9 @@ from students.schemas import (
     GitHubSyncInSchema
 )
 from students.github_screening import screen_github_profile
+from skillsetu_backend.cache_utils import (
+    get_cached, set_cached, generate_cache_key, invalidate_by_prefix, invalidate_cache_keys
+)
 from recruiters.schemas import (
     CandidateJobSearchIn,
     CandidateJobSearchResponseOut,
@@ -110,8 +113,9 @@ def _student_to_out_schema(profile: StudentProfile) -> dict:
         profile.skills_matrix = matrix
         try:
             profile.save(update_fields=['skills_matrix'])
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Silent skills_matrix sync failed for user {profile.user_id}: {e}")
 
     p_strength, breakdown = compute_profile_strength(profile)
     return {
@@ -129,10 +133,10 @@ def _student_to_out_schema(profile: StudentProfile) -> dict:
         "degree": profile.degree or "",
         "cgpa": profile.cgpa,
         "graduation_year": profile.graduation_year,
-        "apaar_id": getattr(profile, 'apaar_id', "") or "",
-        "abc_id": getattr(profile, 'abc_id', "") or "",
+        "apaar_id": profile.apaar_id if profile.apaar_id else "",
+        "abc_id": profile.abc_id if profile.abc_id else "",
         "minor_specialization": getattr(profile, 'minor_specialization', "") or "",
-        "nheqf_level": getattr(profile, 'nheqf_level', "LEVEL_6_0") or "LEVEL_6_0",
+        "nheqf_level": profile.nheqf_level if profile.nheqf_level else "",
         "github_handle": profile.github_handle,
         "github_url": getattr(profile, 'github_url', "") or "",
         "linkedin_url": profile.linkedin_url or "",
@@ -431,6 +435,17 @@ def analyze_student_resume(request, payload: ResumeAnalysisInSchema):
             index_student_profile(profile)
         except Exception:
             pass
+
+        invalidate_by_prefix("skillsetu:placement:")
+        # Invalidate user-specific caches after resume analysis
+        from django.core.cache import cache
+        for key in [f"skillsetu:profile:me:{request.auth.id}",
+                    f"skillsetu:recs:{request.auth.id}",
+                    f"skillsetu:roadmap:{request.auth.id}"]:
+            try:
+                cache.delete(key)
+            except Exception:
+                pass
         
         return 200, _student_to_out_schema(profile)
     except Exception as e:
@@ -447,8 +462,14 @@ def analyze_student_resume(request, payload: ResumeAnalysisInSchema):
 @router.get("/me", response=StudentProfileOutSchema)
 def get_my_profile(request):
     """Retrieve the currently logged-in student's full verified profile."""
+    cache_key = f"skillsetu:profile:me:{request.auth.id}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
     profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
-    return _student_to_out_schema(profile)
+    result = _student_to_out_schema(profile)
+    set_cached(cache_key, result, timeout=30)  # Short TTL — profile data is personal
+    return result
 
 
 @router.put("/me", response=StudentProfileOutSchema)
@@ -570,6 +591,16 @@ def update_my_profile_put(request, payload: StudentProfileInSchema):
     except Exception:
         pass
 
+    # Invalidate user-specific caches after profile update
+    from django.core.cache import cache
+    for key in [f"skillsetu:profile:me:{request.auth.id}",
+                f"skillsetu:recs:{request.auth.id}",
+                f"skillsetu:roadmap:{request.auth.id}"]:
+        try:
+            cache.delete(key)
+        except Exception:
+            pass
+
     return _student_to_out_schema(profile)
 
 
@@ -588,8 +619,8 @@ def get_my_settings(request):
     return profile.get_preferences()
 
 
-@router.patch("/me/settings", response=StudentPreferencesSchema)
-@router.put("/me/settings", response=StudentPreferencesSchema)
+@router.patch("/me/settings", response=StudentPreferencesSchema, operation_id="students_update_my_settings_patch")
+@router.put("/me/settings", response=StudentPreferencesSchema, operation_id="students_update_my_settings_put")
 def update_my_settings(request, payload: StudentPreferencesUpdateIn):
     """
     Update candidate's granular personalization preferences:
@@ -660,11 +691,11 @@ def export_nep_academic_transcript(request):
 
     return 200, {
         "transcript_id": f"NEP-{profile.id}-{datetime.now().strftime('%Y%m%d%H%M')}",
-        "apaar_id": profile.apaar_id or "UNLINKED",
-        "abc_id": profile.abc_id or "UNLINKED",
+        "apaar_id": profile.apaar_id or "",
+        "abc_id": profile.abc_id or "",
         "student_name": name,
-        "institution": profile.institution or "Verified Higher Education Institution",
-        "degree_major": profile.degree or "General Studies",
+        "institution": profile.institution or "",
+        "degree_major": profile.degree or "",
         "minor_specialization": profile.minor_specialization or "None",
         "nheqf_level": profile.nheqf_level,
         "ncrf_credits_earned": ncrf["total_ncrf_credits"],
@@ -720,6 +751,8 @@ def get_candidate_portfolio_by_id(request, student_id: int, blind: bool = False)
     for unbiased, merit-based screening.
     """
     profile = StudentProfile.objects.filter(id=student_id).select_related('user').first()
+    if not profile:
+        profile = StudentProfile.objects.filter(user_id=student_id).select_related('user').first()
     if not profile:
         return 404, {"message": f"Candidate profile with ID {student_id} not found."}
     return 200, _student_to_portfolio_schema(profile, is_blind=blind)
@@ -1004,12 +1037,24 @@ def submit_student_screening_test(request, data: TestSubmissionInSchema = Body(.
         db_session.is_completed = True
         db_session.save()
 
+        # Re-index search corpus (safe inline — no daemon thread risk)
         try:
-            import threading
-            threading.Thread(target=index_student_profile, args=(profile,), daemon=True).start()
-        except Exception:
-            pass
+            index_student_profile(profile)
+        except Exception as idx_err:
+            import logging
+            logging.getLogger(__name__).warning(f"Post-grading index failed for {profile.user_id}: {idx_err}")
 
+        # Invalidate all user-specific and placement caches after grading
+        invalidate_by_prefix("skillsetu:placement:")
+        from django.core.cache import cache
+        for prefix in [f"skillsetu:profile:me:{request.auth.id}",
+                       f"skillsetu:recs:{request.auth.id}",
+                       f"skillsetu:roadmap:{request.auth.id}",
+                       f"skillsetu:notifs:{request.auth.id}"]:
+            try:
+                cache.delete(prefix)
+            except Exception:
+                pass
 
         return 200, {
             "success": True,
@@ -1042,17 +1087,15 @@ def get_job_discovery_feed(
     target_gender: Optional[str] = None,
     q: Optional[str] = None
 ):
-    """
-    Active Openings Feed:
-    Displays published job and internship openings with dynamic filters for
-    role type, location, remote arrangement, DEI diversity hiring drives, and required technical skills.
-    Excludes past deadlines automatically.
-    """
+    cache_key = generate_cache_key("jobs_feed", role_type=role_type, location=location, is_remote=is_remote, skill_tag=skill_tag, is_diversity_drive=is_diversity_drive, target_gender=target_gender, q=q)
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     qs = JobListing.objects.filter(
         status=JobListing.ListingStatus.PUBLISHED
     ).select_related('company', 'recruiter__user')
 
-    # Exclude expired deadlines
     qs = qs.filter(
         models.Q(application_deadline__gte=timezone.now()) |
         models.Q(application_deadline__isnull=True)
@@ -1081,13 +1124,33 @@ def get_job_discovery_feed(
 
     feed_items = []
     for l in qs:
+        h_mode = getattr(l, 'hiring_mode', 'COMPANY') or 'COMPANY'
+        r_id = l.recruiter.id if l.recruiter else None
+        r_user = l.recruiter.user if (l.recruiter and hasattr(l.recruiter, 'user')) else None
+        r_name = f"{getattr(r_user, 'first_name', '')} {getattr(r_user, 'last_name', '')}".strip() or getattr(r_user, 'username', '') if r_user else ""
+        r_avatar = getattr(r_user, 'avatar_url', None) or "" if r_user else ""
+        comp_name = l.company.name if l.company else "Partner Company"
+        comp_logo = l.company.branding_logo_url if l.company else ""
+
+        if h_mode == 'INDIVIDUAL':
+            h_display = r_name or comp_name
+            h_logo = r_avatar or comp_logo
+        else:
+            h_display = comp_name
+            h_logo = comp_logo or r_avatar
+
         feed_items.append(JobDiscoveryItemOut(
             id=l.id,
             title=l.title,
             company_id=l.company.id,
-            company_name=l.company.name,
-            company_logo=l.company.branding_logo_url or "",
+            company_name=comp_name,
+            company_logo=comp_logo,
             company_website=l.company.website or "",
+            recruiter_id=r_id,
+            recruiter_name=r_name,
+            hiring_mode=h_mode,
+            hiring_display_name=h_display,
+            hiring_logo_url=h_logo,
             role_type=l.role_type,
             location=l.location,
             is_remote=getattr(l, 'is_remote', False),
@@ -1104,10 +1167,12 @@ def get_job_discovery_feed(
             created_at=l.created_at
         ))
 
-    return JobDiscoveryFeedOut(
+    result = JobDiscoveryFeedOut(
         total_jobs=len(feed_items),
         jobs=feed_items
     )
+    set_cached(cache_key, result, timeout=120)
+    return result
 
 
 # ---------------------------------------------------------
@@ -1176,6 +1241,13 @@ def apply_to_job(request, listing_id: int, payload: Optional[JobApplicationApply
                 return 400, {"message": "The application deadline for this position has passed."}
 
             student_profile, _ = StudentProfile.objects.select_for_update().get_or_create(user=request.auth)
+
+            # Gate: require at least 1 skill before allowing job applications
+            if not student_profile.skills_matrix:
+                return 400, {
+                    "message": "Please upload your resume or add skills to your profile before applying to jobs. "
+                               "This ensures recruiters can evaluate your candidacy effectively."
+                }
 
             existing = JobApplication.objects.filter(listing=listing, student=student_profile).first()
             if existing:
@@ -1267,8 +1339,26 @@ def get_personalized_recommendations(request, limit: int = 10):
     Scores all active job postings against the candidate's verified skills_matrix.
     Returns high-fit listings with match percentages, matched skills, and missing skill badges.
     """
+    cache_key = f"skillsetu:recs:{request.auth.id}:{limit}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
     profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
-    return compute_personalized_recommendations(profile, limit=limit)
+
+    # Gate: require at least 1 skill before generating recommendations
+    if not profile.skills_matrix:
+        return {
+            "candidate_id": profile.id,
+            "candidate_skills_count": 0,
+            "total_recommendations": 0,
+            "candidate_tier": "PROFILE_INCOMPLETE",
+            "tier_description": "Your profile has no skills yet. Upload your resume or add skills manually to unlock personalized job recommendations.",
+            "recommendations": []
+        }
+
+    result = compute_personalized_recommendations(profile, limit=limit)
+    set_cached(cache_key, result, timeout=120)  # 2 min TTL — recomputed on profile change
+    return result
 
 
 # ---------------------------------------------------------
@@ -1283,8 +1373,26 @@ def get_skill_gap_roadmap(request, target_role: Optional[str] = None):
     Produces prioritized 'Skills to build next' with estimated match percentage boosts
     and actionable engineering project ideas.
     """
+    cache_key = f"skillsetu:roadmap:{request.auth.id}:{target_role or 'default'}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
     profile, _ = StudentProfile.objects.get_or_create(user=request.auth)
-    return compute_skill_gap_roadmap(profile, target_role=target_role)
+
+    # Gate: require at least 1 skill before generating roadmap
+    if not profile.skills_matrix:
+        return {
+            "candidate_id": profile.id,
+            "target_role_analyzed": target_role or "Not Set",
+            "total_jobs_analyzed": 0,
+            "candidate_verified_skills_count": 0,
+            "market_demand_breakdown": [],
+            "skills_to_build_next": []
+        }
+
+    result = compute_skill_gap_roadmap(profile, target_role=target_role)
+    set_cached(cache_key, result, timeout=180)  # 3 min TTL — roadmap is computationally heavy
+    return result
 
 
 # ---------------------------------------------------------
@@ -1297,7 +1405,13 @@ def get_notifications(request):
     Candidate Notifications Hub:
     Returns live notifications for application reviews, status transitions,
     scheduled interview dates, and system updates.
+    Cached for 15 seconds to reduce DB polling pressure.
     """
+    cache_key = f"skillsetu:notifs:{request.auth.id}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     notifs = Notification.objects.filter(user=request.auth).order_by('-created_at')
     unread_count = notifs.filter(is_read=False).count()
     total_count = notifs.count()
@@ -1316,17 +1430,20 @@ def get_notifications(request):
         for n in notifs[:50]
     ]
 
-    return NotificationsResponseOut(
+    result = NotificationsResponseOut(
         unread_count=unread_count,
         total_count=total_count,
         notifications=items
     )
+    set_cached(cache_key, result, timeout=15)  # 15s TTL — notifications poll frequently
+    return result
 
 
 @router.post("/notifications/read-all", response=dict)
 def mark_all_notifications_read(request):
     """Marks all notifications for the authenticated student as read."""
     updated = Notification.objects.filter(user=request.auth, is_read=False).update(is_read=True)
+    invalidate_cache_keys(f"skillsetu:notifs:{request.auth.id}")
     return {"success": True, "marked_read_count": updated}
 
 
@@ -1338,6 +1455,7 @@ def mark_notification_read(request, notification_id: int):
         return 404, {"message": "Notification not found."}
     notif.is_read = True
     notif.save(update_fields=['is_read'])
+    invalidate_cache_keys(f"skillsetu:notifs:{request.auth.id}")
     return 200, {"success": True, "message": "Notification marked as read."}
 
 
@@ -1462,27 +1580,29 @@ def search_students_post(request, payload: RecruiterSearchQueryIn):
     Restricted strictly to authenticated recruiters and admins.
     Supports blind: bool toggle for objective skill-first hiring.
     """
-    limit = payload.limit or 10
+    limit = payload.limit if payload.limit is not None else 10
     blind = payload.blind or False
     results = rank_student_profiles(query=payload.query, limit=limit, blind=blind)
     return results
 
 
 @router.get("/search", response=RecruiterSearchResponseOut, auth=RecruiterAuth())
-def search_students_get(request, q: str, limit: int = 10, blind: bool = False):
+def search_students_get(request, q: str, limit: Optional[int] = 10, blind: bool = False):
     """
     Recruiter Three-Signal Hybrid Search & Ranking (GET query param).
     Restricted strictly to authenticated recruiters and admins.
-    Supports blind=true query parameter.
+    Supports blind=true query parameter. Pass limit=0 to return all matching candidates.
     """
     results = rank_student_profiles(query=q, limit=limit, blind=blind)
     return results
 
 
 @router.get("/", response=List[StudentProfileOutSchema], auth=RecruiterAuth())
-def list_students(request):
-    """Retrieve all student profiles for recruiters."""
-    profiles = StudentProfile.objects.select_related('user').all()
+def list_students(request, limit: int = 500):
+    """Retrieve verified student profiles for recruiters (up to limit)."""
+    profiles = StudentProfile.objects.select_related('user').order_by(
+        '-is_verified', '-overall_confidence_score', '-profile_strength_score'
+    )[:limit]
     return [_student_to_out_schema(p) for p in profiles]
 
 
@@ -1590,11 +1710,11 @@ def get_live_government_schemes_directory(
     target_gender: Optional[str] = None,
     q: Optional[str] = None
 ):
-    """
-    Public Live Government Schemes Directory:
-    Universal discovery feed of national scholarships, research fellowships,
-    and corporate diversity programs across all academic fields.
-    """
+    cache_key = generate_cache_key("schemes_live", domain=domain, scheme_type=scheme_type, target_gender=target_gender, q=q)
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     qs = GovernmentScheme.objects.all()
     if domain:
         qs = qs.filter(domain__iexact=domain)
@@ -1631,11 +1751,13 @@ def get_live_government_schemes_directory(
             match_reasons=[],
             created_at=s.created_at
         ))
-    return {
+    result = {
         "total_schemes": len(items),
         "user_gender": None,
         "schemes": items
     }
+    set_cached(cache_key, result, timeout=300)
+    return result
 
 
 @schemes_router.post("/sync-live-status", response={200: dict})

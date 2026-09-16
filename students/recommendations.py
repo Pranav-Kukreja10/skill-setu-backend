@@ -82,11 +82,6 @@ def compute_personalized_recommendations(
     student_profile: StudentProfile,
     limit: int = 20
 ) -> Dict[str, Any]:
-    """
-    Reverse Matching & Personalized Recommendations:
-    Dynamically scores all published job & internship postings against the candidate's verified skills_matrix.
-    Returns listings ranked descending by direct match percentage, with matched and missing skill breakdowns.
-    """
     from django.utils import timezone
     published_listings = JobListing.objects.filter(
         status=JobListing.ListingStatus.PUBLISHED
@@ -97,6 +92,21 @@ def compute_personalized_recommendations(
     c_matrix = student_profile.skills_matrix or {}
     c_skills = {k.lower().strip() for k in c_matrix.keys()}
     target_roles = [tr.lower().strip() for tr in (student_profile.target_roles or [])]
+    current_designation = (student_profile.current_designation or "").strip()
+    desig_lower = current_designation.lower()
+    desig_words = {w for w in desig_lower.split() if len(w) > 2}
+    conf = float(student_profile.overall_confidence_score or 0.0)
+    is_verified = bool(student_profile.is_verified and conf >= 60.0)
+
+    if is_verified:
+        global_candidate_tier = "ENTERPRISE_VERIFIED"
+        tier_description = "Candidate has completed AI cognitive screening with verified confidence score."
+    elif len(c_skills) >= 2:
+        global_candidate_tier = "EVIDENCE_UNVERIFIED"
+        tier_description = "Resume claims detected. Adaptive skill assessment required to unlock verified 75%+ tier."
+    else:
+        global_candidate_tier = "FOUNDATIONAL_ASPIRANT"
+        tier_description = "Zero/minimal verified skills. Recommendations grounded strictly on declared career designation and entry pathways."
 
     scored = []
     for listing in published_listings:
@@ -107,20 +117,19 @@ def compute_personalized_recommendations(
         matched = [s for s in req_skills if s.lower().strip() in c_skills]
         missing = [s for s in req_skills if s.lower().strip() not in c_skills]
 
-        # Overlap ratio
-        overlap_ratio = len(matched) / max(1, len(req_skills))
-
-        role_bonus = 0.0
         l_title_lower = listing.title.lower().strip()
+        l_title_words = set(l_title_lower.split())
+
+        has_desig_alignment = False
+        if desig_lower and (desig_lower in l_title_lower or l_title_lower in desig_lower or bool(desig_words & l_title_words)):
+            has_desig_alignment = True
         for tr in target_roles:
             if tr in l_title_lower or l_title_lower in tr:
-                role_bonus = 5.0
+                has_desig_alignment = True
                 break
 
-        # Verified credential bonus (+5% if student verified knowledge via AI test)
-        verif_bonus = 5.0 if student_profile.is_verified else 0.0
+        is_entry_level = listing.role_type in [JobListing.RoleType.INTERNSHIP, JobListing.RoleType.APPRENTICESHIP]
 
-        # NEP 2020 Multidisciplinary Minor Synergy Check (Clause 11.3)
         is_nep_multidisciplinary_match = False
         nep_synergy_bonus = 0.0
         nep_match_reason = None
@@ -143,22 +152,95 @@ def compute_personalized_recommendations(
                 deg_label = student_profile.degree or "Major"
                 nep_match_reason = f"NEP 2020 Multidisciplinary Synergy: Bridges your {deg_label} with your '{student_profile.minor_specialization}' Minor ({', '.join(minor_matches[:3])})!"
 
-        # Direct match percentage (0 - 100%)
-        match_pct = round(min(100.0, (overlap_ratio * 85.0) + role_bonus + verif_bonus + nep_synergy_bonus), 1)
+        if global_candidate_tier == "FOUNDATIONAL_ASPIRANT":
+            if has_desig_alignment:
+                base_intent = 22.0
+                if is_entry_level:
+                    base_intent += 6.0
+                if nep_synergy_bonus > 0:
+                    base_intent += 3.0
+                match_pct = round(min(32.0, base_intent), 1)
+                fit_level = "Foundational Aspirant (Designation Aligned)"
+                candidate_tier = "FOUNDATIONAL_ASPIRANT"
+                label_target = current_designation or (target_roles[0] if target_roles else "entry career path")
+                recommendation_reason = f"Grounded on your declared career designation '{label_target}'. Zero verified skills detected on profile. Complete the 5-minute Skill Assessment to unlock 80%+ Enterprise Verified status."
+            else:
+                if is_entry_level:
+                    match_pct = 14.0
+                    fit_level = "Early Career Explorer"
+                    candidate_tier = "FOUNDATIONAL_ASPIRANT"
+                    recommendation_reason = "Entry-level training opportunity open to candidates building initial competencies."
+                else:
+                    match_pct = 8.0
+                    fit_level = "Skill Gap: Assessment Required"
+                    candidate_tier = "UNVERIFIED_ASPIRANT"
+                    recommendation_reason = "Core technical skills missing. Complete skill screening or foundational programs to qualify."
 
-        if match_pct >= 75.0:
-            fit_level = "High Match"
-        elif match_pct >= 50.0:
-            fit_level = "Moderate Match"
+        elif global_candidate_tier == "EVIDENCE_UNVERIFIED":
+            weighted_sum = 0.0
+            for s in matched:
+                s_key = s.lower().strip()
+                item_w = c_matrix.get(s_key, {})
+                w_val = item_w.get("weight", 50) if isinstance(item_w, dict) else 50
+                weighted_sum += w_val
+            weighted_overlap = (weighted_sum / (100.0 * max(1, len(req_skills))))
+            role_bonus = 5.0 if has_desig_alignment else 0.0
+            raw_match = (weighted_overlap * 75.0) + role_bonus + nep_synergy_bonus
+            match_pct = round(min(68.0, max(15.0, raw_match)), 1)
+            candidate_tier = "EVIDENCE_UNVERIFIED"
+            if match_pct >= 50.0:
+                fit_level = "Evidence-Backed (Unverified Test)"
+            else:
+                fit_level = "Developing Match (Unverified)"
+            recommendation_reason = "Resume claims detected. Complete the adaptive assessment to verify syntax and reasoning to reach 85%+ verified tier."
+
         else:
-            fit_level = "Developing Match"
+            weighted_sum = 0.0
+            for s in matched:
+                s_key = s.lower().strip()
+                item_w = c_matrix.get(s_key, {})
+                w_val = item_w.get("weight", 50) if isinstance(item_w, dict) else 50
+                weighted_sum += w_val
+            weighted_overlap = (weighted_sum / (100.0 * max(1, len(req_skills))))
+            role_bonus = 5.0 if has_desig_alignment else 0.0
+            test_boost = (conf * 0.10)
+            raw_match = (weighted_overlap * 75.0) + test_boost + role_bonus + nep_synergy_bonus
+            match_pct = round(min(100.0, max(15.0, raw_match)), 1)
+            candidate_tier = "ENTERPRISE_VERIFIED"
+            if match_pct >= 75.0:
+                fit_level = "Enterprise High Match (Verified)"
+            elif match_pct >= 50.0:
+                fit_level = "Moderate Match (Verified)"
+            else:
+                fit_level = "Developing Match"
+            recommendation_reason = "Verified competencies directly match recruiter job requirements with anti-cheat test telemetry."
 
         comp = listing.company
+        h_mode = getattr(listing, 'hiring_mode', 'COMPANY') or 'COMPANY'
+        r_id = listing.recruiter.id if listing.recruiter else None
+        r_user = listing.recruiter.user if (listing.recruiter and hasattr(listing.recruiter, 'user')) else None
+        r_name = f"{getattr(r_user, 'first_name', '')} {getattr(r_user, 'last_name', '')}".strip() or getattr(r_user, 'username', '') if r_user else ""
+        r_avatar = getattr(r_user, 'avatar_url', None) or "" if r_user else ""
+        comp_name = comp.name if comp else "Partner Company"
+        comp_logo = comp.branding_logo_url if comp else ""
+
+        if h_mode == 'INDIVIDUAL':
+            h_display = r_name or comp_name
+            h_logo = r_avatar or comp_logo
+        else:
+            h_display = comp_name
+            h_logo = comp_logo or r_avatar
+
         scored.append({
             "listing_id": listing.id,
             "title": listing.title,
-            "company_name": comp.name if comp else "Partner Company",
-            "company_logo": comp.branding_logo_url if comp else "",
+            "company_name": comp_name,
+            "company_logo": comp_logo,
+            "recruiter_id": r_id,
+            "recruiter_name": r_name,
+            "hiring_mode": h_mode,
+            "hiring_display_name": h_display,
+            "hiring_logo_url": h_logo,
             "location": listing.location,
             "is_remote": listing.is_remote,
             "role_type": listing.role_type,
@@ -168,6 +250,8 @@ def compute_personalized_recommendations(
             "application_deadline": listing.application_deadline,
             "match_percentage": match_pct,
             "fit_level": fit_level,
+            "candidate_tier": candidate_tier,
+            "recommendation_reason": recommendation_reason,
             "is_nep_multidisciplinary_match": is_nep_multidisciplinary_match,
             "nep_match_reason": nep_match_reason,
             "matched_skills": matched,
@@ -176,13 +260,14 @@ def compute_personalized_recommendations(
             "description": listing.description[:300] + "..." if len(listing.description) > 300 else listing.description
         })
 
-    # Sort descending by match percentage
-    scored.sort(key=lambda x: x["match_percentage"], reverse=True)
+    scored.sort(key=lambda x: (x["match_percentage"], 1 if x["candidate_tier"] == "ENTERPRISE_VERIFIED" else 0), reverse=True)
 
     return {
         "candidate_id": student_profile.id,
         "candidate_skills_count": len(c_skills),
         "total_recommendations": len(scored),
+        "candidate_tier": global_candidate_tier,
+        "tier_description": tier_description,
         "recommendations": scored[:limit]
     }
 
@@ -199,7 +284,9 @@ def compute_skill_gap_roadmap(
     """
     resolved_target_role = target_role.strip() if (target_role and target_role.strip()) else ""
     if not resolved_target_role:
-        if student_profile.target_roles and len(student_profile.target_roles) > 0:
+        if student_profile.current_designation and student_profile.current_designation.strip():
+            resolved_target_role = student_profile.current_designation.strip()
+        elif student_profile.target_roles and len(student_profile.target_roles) > 0:
             resolved_target_role = student_profile.target_roles[0]
         elif student_profile.role_fit_matrix:
             sorted_fits = sorted(

@@ -3,12 +3,22 @@ import json
 import base64
 import requests
 import math
+import time
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class ResilientGrader:
     """
     Grades student screening tests using local memory for MCQs
     and Gemini Cloud APIs with strict rubrics for open-ended Vivas.
     Includes time-wise decay weighting on MCQ answers.
+
+    Resilience Strategy (SIH-hardened):
+    - 3-attempt exponential-backoff retry on Gemini
+    - Automatic failover to Groq (llama-3.3-70b-versatile) if all Gemini attempts fail
+    - Zero-Unearned-Score policy only triggers if ALL providers fail
     """
 
     @staticmethod
@@ -86,8 +96,8 @@ class ResilientGrader:
 
             elif q["type"] == "VIVA":
                 viva_count += 1
-                # Trigger Gemini grading engine for open-ended Viva answers
-                viva_score, evaluation_feedback = ResilientGrader._grade_viva_via_gemini(
+                # Trigger resilient multi-provider grading engine for open-ended Viva answers
+                viva_score, evaluation_feedback = ResilientGrader._grade_viva_resilient(
                     question=q["question_text"],
                     student_answer=student_answer_text,
                     rubric=q["explanation"]
@@ -155,22 +165,46 @@ class ResilientGrader:
         }
 
     @staticmethod
-    def _grade_viva_via_gemini(question: str, student_answer: str, rubric: str) -> tuple:
+    def _grade_viva_resilient(question: str, student_answer: str, rubric: str) -> tuple:
         """
-        Task 3: Response Grading. Routed strictly to gemini-3.1-flash-lite.
+        Multi-provider resilient viva grading pipeline:
+        1. Try Gemini with 3 exponential-backoff retries
+        2. If all Gemini attempts fail, failover to Groq
+        3. Only return None (triggering retest) if ALL providers fail
         """
         if not student_answer:
             return 0, "No answer submitted."
 
+        # --- Attempt 1: Gemini with retries ---
+        gemini_result = ResilientGrader._grade_viva_via_gemini(question, student_answer, rubric)
+        if gemini_result[0] is not None:
+            return gemini_result
+
+        logger.warning(f"Gemini grading failed after retries. Attempting Groq failover...")
+
+        # --- Attempt 2: Groq failover ---
+        groq_result = ResilientGrader._grade_viva_via_groq(question, student_answer, rubric)
+        if groq_result[0] is not None:
+            return groq_result
+
+        logger.error("ALL AI providers failed for viva grading. Triggering retest protocol.")
+        return None, (
+            "Oops! Our automated grading engine experienced a technical hiccup across all providers on our end. "
+            "Because we maintain strict verification standards and never award arbitrary scores, this response requires a retest. "
+            "We sincerely apologize for this inconvenience on our side!"
+        )
+
+    @staticmethod
+    def _grade_viva_via_gemini(question: str, student_answer: str, rubric: str) -> tuple:
+        """
+        Task 3: Response Grading via Gemini with 3-attempt exponential backoff.
+        Routed to gemini-3.1-flash-lite by default.
+        """
         api_key = os.getenv("GEMINI_API_KEY")
-        # Read from .env, default to our verified gemini-3.1-flash-lite model
         model = os.getenv("MODEL_GRADER", "gemini-3.1-flash-lite")
         
         if not api_key:
-            return None, (
-                "Oops! Our automated grading engine is currently unable to authenticate with the cloud provider on our end. "
-                "In upholding strict verification standards, we do not award arbitrary unearned scores. Retest required."
-            )
+            return None, "Gemini API key not configured."
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
@@ -216,20 +250,94 @@ class ResilientGrader:
             }
         }
 
-        try:
-            # Set timeout to 120 seconds to completely eliminate any free-tier connection drops
-            response = requests.post(url, json=payload, timeout=120)
-            response.raise_for_status()
-            
-            result_json = response.json()
-            text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
-            content = json.loads(text_response)
-            
-            return int(content["score"]), content["feedback"]
-        except Exception as e:
-            # Do NOT give free scores! Acknowledge system fault and signal that retest is required.
-            return None, (
-                f"Oops! Our automated grading engine experienced a technical hiccup on our end while reviewing your response ({str(e)}). "
-                "Because we maintain strict verification standards and never award arbitrary scores, this response requires a retest. "
-                "We sincerely apologize for this inconvenience on our side!"
-            )
+        # 3-attempt exponential backoff: 2s, 4s, 8s
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, json=payload, timeout=120)
+                response.raise_for_status()
+                
+                result_json = response.json()
+                text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
+                content = json.loads(text_response)
+                
+                return int(content["score"]), content["feedback"]
+            except Exception as e:
+                wait_time = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                logger.warning(
+                    f"Gemini grading attempt {attempt + 1}/{max_retries} failed: {e}. "
+                    f"{'Retrying in ' + str(wait_time) + 's...' if attempt < max_retries - 1 else 'All retries exhausted.'}"
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(wait_time)
+
+        return None, "Gemini grading failed after 3 retry attempts."
+
+    @staticmethod
+    def _grade_viva_via_groq(question: str, student_answer: str, rubric: str) -> tuple:
+        """
+        Failover grading via Groq (llama-3.3-70b-versatile).
+        Uses OpenAI-compatible chat completions API with JSON mode.
+        """
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            logger.warning("GROQ_API_KEY not set — Groq failover skipped.")
+            return None, "Groq API key not configured."
+
+        model = os.getenv("GROQ_GRADER_MODEL", "llama-3.3-70b-versatile")
+        url = "https://api.groq.com/openai/v1/chat/completions"
+
+        system_prompt = (
+            "You are a strict and objective domain-expert examiner. Grade the candidate's answer to the "
+            "viva question based on the provided expert grading rubric. "
+            "Score strictly on a scale of 0 to 100.\n\n"
+            "Rubric anchors:\n"
+            "- 90-100: Excellent. Core concepts, specific methodologies, practical trade-offs.\n"
+            "- 50-80: Acceptable. Basic understanding but lacks operational specifics.\n"
+            "- 10-40: Weak. Vague keywords with no real domain comprehension.\n"
+            "- 0: Irrelevant, empty, or plagiarized.\n\n"
+            "Return ONLY JSON: {\"score\": <int>, \"feedback\": \"<2-sentence feedback>\"}"
+        )
+
+        user_content = (
+            f"Question: {question}\n"
+            f"Candidate Answer: {student_answer}\n"
+            f"Grading Rubric Anchor: {rubric}"
+        )
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.1,
+            "max_tokens": 256
+        }
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+
+        # 2-attempt retry on Groq (it's fast, so shorter backoff)
+        for attempt in range(2):
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=30)
+                response.raise_for_status()
+
+                result = response.json()
+                content_text = result["choices"][0]["message"]["content"]
+                content = json.loads(content_text)
+
+                score = int(content.get("score", 0))
+                feedback = content.get("feedback", "Graded via Groq failover.")
+                logger.info(f"Groq failover grading successful: score={score}")
+                return score, feedback
+            except Exception as e:
+                logger.warning(f"Groq grading attempt {attempt + 1}/2 failed: {e}")
+                if attempt == 0:
+                    time.sleep(1)
+
+        return None, "Groq failover grading also failed."

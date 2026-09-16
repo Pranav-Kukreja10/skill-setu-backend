@@ -59,6 +59,24 @@ Thumbs.db
 .system_generated/
 scratch/
 GEMINI.md
+Showcase.md 
+SIH_SCREENING_MASTER_ARCHITECTURE.md
+SIH_COMPLIANCE_CHECKLIST.md 
+System-Design.md 
+start-dev.md 
+Agent.md 
+Architecture.md 
+bench_search.py 
+completed_features.md 
+Design.md 
+FEATURES.md 
+
+temp.html 
+restats.txt 
+
+test_db_filter.py 
+test_reliability.py  
+index_test.py 
 
 # Temporary & Test Caches
 *.tmp

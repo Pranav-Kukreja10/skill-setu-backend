@@ -599,16 +599,16 @@ class Command(BaseCommand):
                 g_program.enrolled_students.add(profile)
                 self.stdout.write(f"  [Enrollment] Alex -> {g_program.title}")
 
-        # 6. FACULTY COLLABORATION SEEDING (DR. RAJNEESH TALWAR & FACULTY DEAN)
-        talwar_user = User.objects.filter(username="dr_talwar").first() or User.objects.filter(username="faculty_dean").first()
-        if talwar_user:
-            faculty_prof, _ = FacultyProfile.objects.get_or_create(user=talwar_user)
+        # 6. FACULTY COLLABORATION SEEDING (DR. RAMESH IYER & FACULTY DEAN)
+        iyer_user = User.objects.filter(username="dr_iyer").first() or User.objects.filter(username="faculty_dean").first()
+        if iyer_user:
+            faculty_prof, _ = FacultyProfile.objects.get_or_create(user=iyer_user)
 
             # Enroll Faculty in Tata Motors Workshop
             t_program = seeded_programs.get("Advanced Electric Mobility & Battery Pack Engineering Workshop")
             if t_program:
                 t_program.enrolled_faculty.add(faculty_prof)
-                self.stdout.write(f"  [Faculty Enrollment] {talwar_user.username} -> {t_program.title}")
+                self.stdout.write(f"  [Faculty Enrollment] {iyer_user.username} -> {t_program.title}")
 
             # Notify Recruiter about Faculty FDP Application
             tata_fdp = seeded_listings.get("Tata Motors EV Powertrain & Battery Management FDP")
@@ -617,11 +617,11 @@ class Command(BaseCommand):
                     user=tata_fdp.recruiter.user,
                     title=f"Faculty FDP Application: {tata_fdp.title}",
                     defaults={
-                        "message": f"Prof. {talwar_user.first_name} {talwar_user.last_name} ({faculty_prof.designation} at Chitkara University) submitted an application for '{tata_fdp.title}'. Statement of Purpose: 'Looking to incorporate electric powertrain simulation into our university laboratory.'",
+                        "message": f"Prof. {iyer_user.first_name} {iyer_user.last_name} ({faculty_prof.designation} at Indian Institute of Technology Bombay) submitted an application for '{tata_fdp.title}'. Statement of Purpose: 'Looking to incorporate electric powertrain simulation into our university laboratory.'",
                         "notification_type": Notification.NotificationType.APPLICATION_REVIEW,
                         "related_listing_id": tata_fdp.id
                     }
                 )
-                self.stdout.write(f"  [Faculty Notification] {talwar_user.username} FDP application registered for Tata Motors.")
+                self.stdout.write(f"  [Faculty Notification] {iyer_user.username} FDP application registered for Tata Motors.")
 
         self.stdout.write(self.style.SUCCESS("[OK] Successfully seeded realistic enterprise partner ecosystem, faculty opportunities, learning programs & digital portfolio records!"))

@@ -67,10 +67,18 @@ class Command(BaseCommand):
                 "is_verified": True,
                 "branding_logo_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cb/Chitkara_University_logo.png/220px-Chitkara_University_logo.png",
                 "departments": [
-                    {"name": "Computer Science & Engineering", "code": "CSE", "head_of_department": "Dr. Rajneesh Talwar"},
+                    {"name": "Computer Science & Engineering", "code": "CSE", "head_of_department": "Dr. Ramesh Iyer"},
                     {"name": "Electronics & Communication Engineering", "code": "ECE", "head_of_department": "Dr. Sandeep Arora"},
                     {"name": "Mechanical Engineering", "code": "MECH", "head_of_department": "Dr. Gurwinder Singh"},
-                    {"name": "Chitkara Business School", "code": "CBS", "head_of_department": "Dr. Babita Singla"}
+                    {"name": "Civil Engineering", "code": "CIVIL", "head_of_department": "Dr. Pankaj Kumar"},
+                    {"name": "Chitkara Business School", "code": "CBS", "head_of_department": "Dr. Babita Singla"},
+                    {"name": "Chitkara Design School", "code": "CDS", "head_of_department": "Prof. Nitin Dutt"},
+                    {"name": "Chitkara College of Pharmacy", "code": "CCP", "head_of_department": "Dr. Sandeep Sharma"},
+                    {"name": "Chitkara School of Health Sciences", "code": "CSHS", "head_of_department": "Dr. Sonika Bakshi"},
+                    {"name": "Chitkara School of Planning & Architecture", "code": "CSPA", "head_of_department": "Prof. I.J.S. Bakshi"},
+                    {"name": "Chitkara College of Hotel Management", "code": "CCHM", "head_of_department": "Chef Amit Sood"},
+                    {"name": "Chitkara School of Mass Communication", "code": "CSMC", "head_of_department": "Dr. Ashutosh Mishra"},
+                    {"name": "Chitkara Law School", "code": "CLS", "head_of_department": "Dr. Jasneet Kaur"}
                 ]
             }
         ]
@@ -115,25 +123,25 @@ class Command(BaseCommand):
             )
             self.stdout.write(self.style.SUCCESS(f"  [Faculty Link] {faculty_user.username} -> {nitk.name} ({fp.designation})"))
 
-        # 2.1 CHITKARA FACULTY PERSONA (DR. RAJNEESH TALWAR)
+        # 2.1 CHITKARA FACULTY PERSONA (DR. RAMESH IYER)
         chitkara = Institution.objects.filter(name__icontains="Chitkara").first()
         if chitkara:
             c_dept = Department.objects.filter(institution=chitkara, name__icontains="Computer Science").first()
-            talwar_user, _ = User.objects.get_or_create(
-                username="dr_talwar",
+            iyer_user, _ = User.objects.get_or_create(
+                username="dr_iyer",
                 defaults={
-                    "email": "rajneesh.talwar@chitkara.edu.in",
+                    "email": "ramesh.iyer@chitkara.edu.in",
                     "role": User.Role.ACADEMIA,
-                    "first_name": "Rajneesh",
-                    "last_name": "Talwar",
+                    "first_name": "Ramesh",
+                    "last_name": "Iyer",
                     "phone_number": "+919876500001"
                 }
             )
-            talwar_user.set_password("password123")
-            talwar_user.save()
+            iyer_user.set_password("password123")
+            iyer_user.save()
 
             fp_t, _ = FacultyProfile.objects.update_or_create(
-                user=talwar_user,
+                user=iyer_user,
                 defaults={
                     "institution": chitkara,
                     "department": c_dept,
@@ -143,7 +151,7 @@ class Command(BaseCommand):
                     "is_institution_admin": True
                 }
             )
-            self.stdout.write(self.style.SUCCESS(f"  [Faculty Link] {talwar_user.username} -> {chitkara.name} ({fp_t.designation})"))
+            self.stdout.write(self.style.SUCCESS(f"  [Faculty Link] {iyer_user.username} -> {chitkara.name} ({fp_t.designation})"))
 
         self.stdout.write(self.style.SUCCESS("[OK] Successfully seeded verified institutions, academic departments & faculty!"))
 

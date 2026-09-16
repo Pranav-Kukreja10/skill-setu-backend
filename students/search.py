@@ -103,6 +103,17 @@ COMMON_SKILL_SYNONYMS = {
     "html": "html5",
     "css": "css3",
     "dj": "django",
+    "node": "node.js",
+    "nodejs": "node.js",
+    "node js": "node.js",
+    "nextjs": "next.js",
+    "next.js": "next.js",
+    "frontend": "react",
+    "front-end": "react",
+    "backend": "django",
+    "back-end": "django",
+    "fullstack": "react",
+    "full stack": "react",
     
     # Mechanical Engineering
     "cad": "autocad",
@@ -229,6 +240,11 @@ def build_canonical_skill_map() -> Dict[str, Dict[str, Any]]:
             "category": "core" | "methodology" | "tooling" | "profile"
         }
     """
+    from django.core.cache import cache
+    cached_map = cache.get("canonical_skill_map")
+    if cached_map is not None:
+        return cached_map
+
     from students.models import JobBenchmark, StudentProfile
 
     canonical_map = {}
@@ -286,8 +302,9 @@ def build_canonical_skill_map() -> Dict[str, Dict[str, Any]]:
                 "category": "synonym"
             }
 
+    # Cache the result for 1 hour to prevent constant DB scans
+    cache.set("canonical_skill_map", canonical_map, timeout=3600)
     return canonical_map
-
 
 def infer_query_domain(query: str, canonical_map: Dict[str, Dict[str, Any]]) -> Tuple[Optional[str], List[str]]:
     """
@@ -363,7 +380,8 @@ def compute_skill_tag_score(
     query_skill_tags: List[str],
     inferred_sector: Optional[str],
     candidate_sectors: Optional[List[str]] = None,
-    raw_extracted_skills: Optional[List[str]] = None
+    raw_extracted_skills: Optional[List[str]] = None,
+    canonical_map: Optional[Dict[str, Dict[str, Any]]] = None
 ) -> Tuple[float, List[str]]:
     """
     Deterministic Skill-Tag Score (no ML):
@@ -373,6 +391,7 @@ def compute_skill_tag_score(
     - Ws: individual skill proficiency weight (0-100)
     - Pe: active project evidence score (0-100)
     - Sector consistency factor
+    - Skill coverage: 100% exact coverage strictly dominates partial coverage.
     """
     if not query_skill_tags:
         return 0.0, []
@@ -406,12 +425,24 @@ def compute_skill_tag_score(
         q_clean = q_skill.lower().strip()
         matched_key = None
 
-        # Direct match or exact substring match
+        # 1. Direct exact match
         if q_clean in candidate_skills_lower:
             matched_key = q_clean
+        # 2. Canonical alias / synonym match
+        elif canonical_map and q_clean in canonical_map and canonical_map[q_clean]["canonical"] in candidate_skills_lower:
+            matched_key = canonical_map[q_clean]["canonical"]
         else:
+            # 3. Safe word boundary match (avoid "sql" matching "postgresql", "go" matching "django")
             for c_skill in candidate_skills_lower.keys():
-                if q_clean == c_skill or q_clean in c_skill or c_skill in q_clean:
+                if q_clean == c_skill:
+                    matched_key = c_skill
+                    break
+                if len(q_clean) >= 3 and re.search(r'\b' + re.escape(q_clean) + r'\b', c_skill):
+                    # Prevent false positive substrings: e.g. "sql" in "nosql" or "postgresql"
+                    if q_clean == "sql" and ("nosql" in c_skill or "postgresql" in c_skill):
+                        continue
+                    if q_clean == "java" and "javascript" in c_skill:
+                        continue
                     matched_key = c_skill
                     break
 
@@ -436,8 +467,13 @@ def compute_skill_tag_score(
     overlap_ratio = len(matched_skills) / max(1, len(query_skill_tags))
     avg_proficiency = min(1.0, total_contribution / max(1, len(matched_skills)))
     
-    # Skill score combines direct presence (70%) and applied depth (30%)
-    normalized_score = round(min(1.0, (0.70 * overlap_ratio) + (0.30 * avg_proficiency)), 4)
+    # Skill score MUST strictly reflect skill coverage:
+    # 100% exact coverage (overlap_ratio >= 1.0) achieves 0.90 to 1.00.
+    # Incomplete coverage is strictly scaled by overlap_ratio and capped so missing skills cannot beat full match!
+    if overlap_ratio >= 1.0:
+        normalized_score = round(min(1.0, 0.90 + (0.10 * avg_proficiency)), 4)
+    else:
+        normalized_score = round(min(0.80, overlap_ratio * (0.65 + 0.20 * avg_proficiency)), 4)
     return normalized_score, matched_skills
 
 
@@ -686,8 +722,84 @@ def rank_student_profiles(
         logger.warning(f"pgvector query annotation not available or failed: {e}. Falling back to in-memory cosine.")
         has_pgvector = False
 
-    # Base queryset
-    qs = StudentProfile.objects.select_related("user").all()
+    # Base queryset: Defer heavy, unused JSON fields to prevent massive Python deserialization overhead.
+    base_qs = StudentProfile.objects.select_related("user").defer(
+        "preferences", "github_metrics", "certifications", 
+        "skills_categorized", "internships", "achievements", "academic_records"
+    )
+
+    # PRE-FILTER OPTIMIZATION:
+    # Always prioritize verified, high-confidence candidates so initial load (e.g. limit=30)
+    # immediately surfaces top-matching 95%+ candidates without needing full-table rescans.
+    if limit is None or limit <= 0:
+        MAX_DB_CANDIDATES = 10000
+    else:
+        # Minimum 600 candidates to ensure all multi-skill intersections are thoroughly explored
+        MAX_DB_CANDIDATES = max(600, min(10000, limit * 20))
+    pks_to_fetch = set()
+
+    order_criteria = ["-is_verified", "-overall_confidence_score", "-profile_strength_score"]
+
+    if query_skills:
+        from django.db.models import Q
+        # 1. First priority: Candidates matching ALL requested skills (100% skill coverage)
+        if len(query_skills) > 1:
+            all_skills_q = Q()
+            for skill in query_skills:
+                all_skills_q &= Q(search_corpus__icontains=skill)
+            full_match_pks = list(
+                base_qs.filter(all_skills_q)
+                .order_by(*order_criteria)
+                .values_list('pk', flat=True)[:MAX_DB_CANDIDATES]
+            )
+            pks_to_fetch.update(full_match_pks)
+
+        # 2. Second priority: Candidates matching any requested skill
+        remaining_budget = MAX_DB_CANDIDATES - len(pks_to_fetch)
+        if remaining_budget > 0:
+            any_skill_q = Q()
+            for skill in query_skills:
+                any_skill_q |= Q(search_corpus__icontains=skill)
+            partial_pks = list(
+                base_qs.filter(any_skill_q)
+                .order_by(*order_criteria)
+                .values_list('pk', flat=True)[:remaining_budget]
+            )
+            pks_to_fetch.update(partial_pks)
+    else:
+        # General role or plain text query (e.g. "software engineer", "frontend", "full stack")
+        clean_tokens = [w.lower() for w in re.findall(r'[a-zA-Z0-9+#.-]{2,}', query) 
+                        if w.lower() not in {'and', 'or', 'the', 'for', 'with', 'in', 'of', 'to', 'a', 'an', 'is', 'on', 'at'}]
+        if clean_tokens:
+            from django.db.models import Q
+            token_q = Q()
+            for t in clean_tokens:
+                token_q |= Q(search_corpus__icontains=t)
+            kw_pks = list(
+                base_qs.filter(token_q)
+                .order_by(*order_criteria)
+                .values_list('pk', flat=True)[:MAX_DB_CANDIDATES]
+            )
+            pks_to_fetch.update(kw_pks)
+
+    if has_pgvector:
+        from pgvector.django import CosineDistance
+        semantic_pks = list(
+            base_qs.exclude(embedding__isnull=True)
+            .order_by(CosineDistance("embedding", query_embedding))
+            .values_list('pk', flat=True)[:50]
+        )
+        pks_to_fetch.update(semantic_pks)
+
+    if pks_to_fetch:
+        qs = base_qs.filter(pk__in=pks_to_fetch)
+    else:
+        # Fallback ordered by quality
+        fallback_pks = list(
+            base_qs.order_by(*order_criteria)
+            .values_list('pk', flat=True)[:MAX_DB_CANDIDATES]
+        )
+        qs = base_qs.filter(pk__in=fallback_pks)
 
     # Full-text SearchVector & SearchRank
     has_fulltext = False
@@ -725,16 +837,21 @@ def rank_student_profiles(
             query_skill_tags=query_skills,
             inferred_sector=inferred_sector,
             candidate_sectors=cand_sectors,
-            raw_extracted_skills=cand_raw_skills
+            raw_extracted_skills=cand_raw_skills,
+            canonical_map=canonical_map
         )
 
         # Signal 2: Semantic score
+        has_profile_embedding = False
         if has_pgvector and hasattr(profile, "cosine_dist") and profile.cosine_dist is not None:
             semantic_score = max(0.0, min(1.0, 1.0 - float(profile.cosine_dist)))
+            has_profile_embedding = True
         elif profile.embedding:
             semantic_score = compute_semantic_score(query_embedding, profile.embedding)
+            has_profile_embedding = True
         else:
             semantic_score = 0.0
+            has_profile_embedding = False
         semantic_score = round(semantic_score, 4)
 
         # Signal 3: Full-text score
@@ -762,19 +879,32 @@ def rank_student_profiles(
             fulltext_score = 0.0
             total_multiplier = 1.0
         else:
-            # Base Three-Signal Relevance Fusion (heavily weighted towards skill presence)
-            effective_weights = (0.70, 0.20, 0.10) if query_skills else (w_skill, w_semantic, w_fulltext)
+            # Base Three-Signal Relevance Fusion (skill-focused with adaptive missing-embedding handling)
+            if query_skills:
+                # Skill-explicit recruiter query (e.g. "python django sql git c++")
+                if has_profile_embedding:
+                    effective_weights = (0.85, 0.05, 0.10)
+                else:
+                    # No embedding on profile: do not penalize with 0.0! Skill presence is 0.88, fulltext 0.12
+                    effective_weights = (0.88, 0.0, 0.12)
+            else:
+                # Natural language conversational query (e.g. "experienced payments engineer")
+                if has_profile_embedding:
+                    effective_weights = (w_skill, w_semantic, w_fulltext)
+                else:
+                    effective_weights = (0.65, 0.0, 0.35)
+
             relevance_score = fuse_scores(
                 skill_tag_score=skill_score,
-                semantic_score=semantic_score,
+                semantic_score=semantic_score if has_profile_embedding else 0.0,
                 fulltext_score=fulltext_score,
                 weights=effective_weights
             )
 
             # Verification & Cognitive Confidence Multiplier:
             conf_ratio = max(0.0, min(1.0, (profile.overall_confidence_score or 0.0) / 100.0))
-            verified_bonus = 0.10 if profile.is_verified else 0.00
-            confidence_boost = 1.0 + (0.15 * conf_ratio) + verified_bonus
+            verified_bonus = 0.05 if profile.is_verified else 0.00
+            confidence_boost = 1.0 + (0.10 * conf_ratio) + verified_bonus
 
             # Target Role Intent Alignment Bonus:
             candidate_target_roles = profile.target_roles or []
@@ -812,11 +942,20 @@ def rank_student_profiles(
             "inferred_sector": inferred_sector
         })
 
-    # Sort descending by final fused score
-    # If there are candidates with actual skill matches (>0), prioritize them exclusively
+    # Sort descending by skill coverage (all required skills first), then final fused score
     matching_candidates = [r for r in scored_results if r["final_score"] > 0.0]
     results_to_sort = matching_candidates if matching_candidates else scored_results
-    results_to_sort.sort(key=lambda x: x["final_score"], reverse=True)
+    if query_skills:
+        results_to_sort.sort(
+            key=lambda x: (
+                len(x["matched_skills"]),
+                x["final_score"],
+                x["overall_confidence_score"] or 0
+            ),
+            reverse=True
+        )
+    else:
+        results_to_sort.sort(key=lambda x: x["final_score"], reverse=True)
 
     return {
         "query": query,
@@ -825,6 +964,6 @@ def rank_student_profiles(
         "weights_used": {"skill_tag": w_skill, "semantic": w_semantic, "fulltext": w_fulltext},
         "total_results": len(results_to_sort),
         "is_blind": blind,
-        "results": results_to_sort[:limit]
+        "results": results_to_sort if (limit is None or limit <= 0) else results_to_sort[:limit]
     }
 

@@ -42,6 +42,17 @@ class RecruiterProfile(models.Model):
     )
     designation = models.CharField(max_length=150, help_text="e.g. Lead Technical Recruiter, VP of Engineering")
     department = models.CharField(max_length=150, blank=True, help_text="e.g. Talent Acquisition, Infrastructure Team")
+    bio = models.TextField(blank=True, default='', help_text="Recruiter professional biography and hiring philosophy")
+    linkedin_url = models.URLField(max_length=500, blank=True, default='')
+    website = models.URLField(max_length=500, blank=True, default='')
+    location = models.CharField(max_length=255, blank=True, default='', help_text="City, Country")
+    experience_years = models.FloatField(default=0.0, blank=True)
+    hiring_mode_preference = models.CharField(
+        max_length=20,
+        default='COMPANY',
+        choices=[('COMPANY', 'Company Hiring'), ('INDIVIDUAL', 'Independent Recruiter / Self Hiring')],
+        help_text="Default hiring attribution mode"
+    )
     contact_phone = models.CharField(max_length=30, blank=True)
     is_company_admin = models.BooleanField(default=False, help_text="Authorizes editing company verification, website, branding")
     preferences = models.JSONField(
@@ -119,6 +130,10 @@ class JobListing(models.Model):
         ARCHIVED = 'ARCHIVED', 'Archived'
         CLOSED = 'CLOSED', 'Closed'
 
+    class HiringMode(models.TextChoices):
+        COMPANY = 'COMPANY', 'Company Hiring'
+        INDIVIDUAL = 'INDIVIDUAL', 'Independent Recruiter / Self Hiring'
+
     recruiter = models.ForeignKey(
         RecruiterProfile,
         on_delete=models.CASCADE,
@@ -128,6 +143,12 @@ class JobListing(models.Model):
         Company,
         on_delete=models.CASCADE,
         related_name='job_listings'
+    )
+    hiring_mode = models.CharField(
+        max_length=20,
+        choices=HiringMode.choices,
+        default=HiringMode.COMPANY,
+        help_text="Designates if hiring on behalf of a company or self/independent recruiter"
     )
     title = models.CharField(max_length=255, help_text="e.g. Junior Backend Engineer, Robotics Intern, EV Powertrain FDP")
     role_type = models.CharField(max_length=30, choices=RoleType.choices, default=RoleType.FULL_TIME)
@@ -190,8 +211,18 @@ class JobListing(models.Model):
             ),
         ]
 
+    @property
+    def hiring_display_name(self) -> str:
+        if self.hiring_mode in ['INDIVIDUAL', 'SELF']:
+            user = self.recruiter.user if (self.recruiter and self.recruiter.user) else None
+            if user:
+                full = f"{user.first_name} {user.last_name}".strip()
+                return full or user.username
+            return "Independent Recruiter"
+        return self.company.name if self.company else "Partner Enterprise"
+
     def __str__(self):
-        return f"{self.title} @ {self.company.name} ({self.status}) [{self.role_type}]"
+        return f"{self.title} @ {self.hiring_display_name} ({self.status}) [{self.role_type}]"
 
 class JobApplication(models.Model):
     class ApplicationStatus(models.TextChoices):

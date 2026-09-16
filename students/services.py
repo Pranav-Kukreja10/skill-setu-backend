@@ -79,19 +79,13 @@ def calculate_role_score(skills_matrix: dict, benchmark: JobBenchmark) -> int:
     final_score = int((0.5 * core_score) + (0.3 * method_score) + (0.2 * tooling_score))
     return min(final_score, 100)
 
-def generate_role_fit_matrix(skills_matrix: dict) -> dict:
-    """
-    Generates the multi-role fitment scores dynamically using 
-    active database benchmarks stored in PostgreSQL.
-    Filters out any role where the candidate has a <= 5% match.
-    """
+def generate_role_fit_matrix(skills_matrix: dict, current_designation: str = "", target_roles: list = None, degree: str = "") -> dict:
     matrix = {}
     benchmarks = JobBenchmark.objects.select_related('sector').all()
     
     for benchmark in benchmarks:
         score = calculate_role_score(skills_matrix, benchmark)
         
-        # UX FILTER: Hide completely irrelevant cards
         if score <= 5:
             continue
         
@@ -108,6 +102,27 @@ def generate_role_fit_matrix(skills_matrix: dict) -> dict:
             "sector": benchmark.sector.name,
             "verified_confidence_score": None
         }
+
+    if not matrix and (current_designation or target_roles or degree):
+        candidate_terms = set()
+        if current_designation:
+            candidate_terms.update([w.lower() for w in current_designation.split() if len(w) > 2])
+        if target_roles:
+            for tr in target_roles:
+                candidate_terms.update([w.lower() for w in tr.split() if len(w) > 2])
+        if degree:
+            candidate_terms.update([w.lower() for w in degree.split() if len(w) > 2])
+
+        for benchmark in benchmarks:
+            bench_words = set(benchmark.role_title.lower().split())
+            if candidate_terms & bench_words:
+                matrix[benchmark.role_title] = {
+                    "score": 25,
+                    "fit_level": "Foundational Aspirant (Skills Needed)",
+                    "sector": benchmark.sector.name,
+                    "verified_confidence_score": 0
+                }
+
     return matrix
 
 
