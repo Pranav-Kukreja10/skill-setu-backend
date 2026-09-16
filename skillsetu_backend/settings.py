@@ -19,20 +19,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Load local environment files
 load_dotenv(BASE_DIR / '.env', override=True)
 
-SECRET_KEY = os.getenv('SECRET_KEY', 'fallback-key')
-DEBUG = os.getenv('DEBUG', 'True') == 'True'
+SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-0)m*j8j!5hdlk6f^18pa*3(6zj^s0#!ubg3fp9!!o(tg_$41pr')
+DEBUG = os.getenv('DEBUG', 'False').lower() in ('true', '1')
 
-
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
-
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-0)m*j8j!5hdlk6f^18pa*3(6zj^s0#!ubg3fp9!!o(tg_$41pr'
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-ALLOWED_HOSTS = ['*']
+_allowed_hosts_env = os.getenv('ALLOWED_HOSTS', '*')
+ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_env.split(',') if h.strip()]
+if '.onrender.com' not in ALLOWED_HOSTS and '*' not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append('.onrender.com')
 
 
 # Application definition
@@ -48,7 +41,7 @@ INSTALLED_APPS = [
     "corsheaders",
     "ninja",
 
-    #Our Installed Apps: 
+    # Our Installed Apps: 
     'accounts',
     'students',
     'recruiters',
@@ -58,6 +51,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -97,20 +91,48 @@ AUTH_USER_MODEL = 'accounts.User'
 #     }
 # }
 
-# PostgreSQL Database Configuration with Persistent Connection Pooling & PgBouncer Support
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME', 'skillsetu_db'),
-        'USER': os.getenv('DB_USER', 'postgres'),
-        'PASSWORD': os.getenv('DB_PASSWORD', ''),
-        'HOST': os.getenv('DB_HOST', '127.0.0.1'),
-        'PORT': os.getenv('DB_PORT', '5432'),
-        'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '600')),
-        'CONN_HEALTH_CHECKS': os.getenv('DB_CONN_HEALTH_CHECKS', 'True').lower() in ('true', '1'),
-        'DISABLE_SERVER_SIDE_CURSORS': os.getenv('DB_DISABLE_SERVER_SIDE_CURSORS', 'False').lower() in ('true', '1'),
+# PostgreSQL Database Configuration (Supports local, Neon, and cloud providers via DATABASE_URL or individual DB_* env vars)
+DATABASE_URL = os.getenv('DATABASE_URL')
+if DATABASE_URL:
+    import urllib.parse
+    _db_url = urllib.parse.urlparse(DATABASE_URL)
+    _query_params = urllib.parse.parse_qs(_db_url.query)
+    _sslmode = _query_params.get('sslmode', [os.getenv('DB_SSLMODE', 'require')])[0]
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': _db_url.path.lstrip('/'),
+            'USER': urllib.parse.unquote(_db_url.username or ''),
+            'PASSWORD': urllib.parse.unquote(_db_url.password or ''),
+            'HOST': _db_url.hostname,
+            'PORT': str(_db_url.port or '5432'),
+            'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '600')),
+            'CONN_HEALTH_CHECKS': os.getenv('DB_CONN_HEALTH_CHECKS', 'True').lower() in ('true', '1'),
+            'DISABLE_SERVER_SIDE_CURSORS': os.getenv('DB_DISABLE_SERVER_SIDE_CURSORS', 'True' if 'pooler' in (_db_url.hostname or '') else 'False').lower() in ('true', '1'),
+            'OPTIONS': {
+                'sslmode': _sslmode,
+            },
+        }
     }
-}
+else:
+    _db_host = os.getenv('DB_HOST', '127.0.0.1')
+    _default_ssl = 'prefer' if _db_host in ('127.0.0.1', 'localhost') else 'require'
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.getenv('DB_NAME', 'skillsetu_db'),
+            'USER': os.getenv('DB_USER', 'postgres'),
+            'PASSWORD': os.getenv('DB_PASSWORD', ''),
+            'HOST': _db_host,
+            'PORT': os.getenv('DB_PORT', '5432'),
+            'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '600')),
+            'CONN_HEALTH_CHECKS': os.getenv('DB_CONN_HEALTH_CHECKS', 'True').lower() in ('true', '1'),
+            'DISABLE_SERVER_SIDE_CURSORS': os.getenv('DB_DISABLE_SERVER_SIDE_CURSORS', 'False').lower() in ('true', '1'),
+            'OPTIONS': {
+                'sslmode': os.getenv('DB_SSLMODE', _default_ssl),
+            },
+        }
+    }
 
 CACHES = {
     'default': {
@@ -157,15 +179,27 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
-# Frontend Allowed Origins (Vite Server allowlist)
+# Frontend Allowed Origins (Vite Server allowlist & Vercel portal)
 CORS_ALLOWED_ORIGINS = [
+    "https://skillsetu-portal.vercel.app",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",
@@ -173,7 +207,32 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
+_cors_origins_env = os.getenv('CORS_ALLOWED_ORIGINS', '')
+if _cors_origins_env:
+    for origin in _cors_origins_env.split(','):
+        if origin.strip() and origin.strip() not in CORS_ALLOWED_ORIGINS:
+            CORS_ALLOWED_ORIGINS.append(origin.strip())
+
+# Support dynamic Vercel preview URLs (e.g. skillsetu-portal-git-*.vercel.app)
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https:\/\/.*\.vercel\.app$",
+]
+
 CORS_ALLOW_CREDENTIALS = True
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://skillsetu-portal.vercel.app",
+    "https://*.onrender.com",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+_csrf_origins_env = os.getenv('CSRF_TRUSTED_ORIGINS', '')
+if _csrf_origins_env:
+    for origin in _csrf_origins_env.split(','):
+        if origin.strip() and origin.strip() not in CSRF_TRUSTED_ORIGINS:
+            CSRF_TRUSTED_ORIGINS.append(origin.strip())
 
 # Email Delivery Configuration (Google SMTP & Fallbacks)
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'

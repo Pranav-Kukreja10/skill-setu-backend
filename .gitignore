@@ -87,4 +87,13 @@ index_test.py
 .coverage
 htmlcov/
 
+# Database Backups & Dumps
+backups/
+*.sql
+*.dump
+
 SkillSetu
+.neon
+node_modules/
+
+.gitignore 

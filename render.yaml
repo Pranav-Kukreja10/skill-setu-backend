@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: skillsetu-backend
+    runtime: python
+    plan: free
+    region: singapore # Close to Neon ap-southeast-1 database
+    branch: features
+    buildCommand: "./build.sh"
+    startCommand: "gunicorn skillsetu_backend.wsgi:application --workers 1 --threads 2 --timeout 120 --bind 0.0.0.0:$PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DEBUG
+        value: "False"
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: AI_PROVIDER
+        value: "cloud"
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_URL_UNPOOLED
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: EMAIL_HOST_USER
+        value: "pranavkukreja492@gmail.com"
+      - key: EMAIL_HOST_PASSWORD
+        sync: false
+      - key: DEFAULT_FROM_EMAIL
+        value: "Skill Setu No-Reply <pranavkukreja492@gmail.com>"
+      - key: CORS_ALLOWED_ORIGINS
+        value: "https://skillsetu-portal.vercel.app"
+      - key: CSRF_TRUSTED_ORIGINS
+        value: "https://skillsetu-portal.vercel.app,https://*.onrender.com"
