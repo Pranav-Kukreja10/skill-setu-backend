@@ -6,7 +6,7 @@ services:
     region: singapore # Close to Neon ap-southeast-1 database
     branch: features
     buildCommand: "./build.sh"
-    startCommand: "gunicorn skillsetu_backend.wsgi:application --workers 1 --threads 2 --timeout 120 --bind 0.0.0.0:$PORT"
+    startCommand: "gunicorn skillsetu_backend.wsgi:application --workers 1 --threads 2 --timeout 120 --bind 0.0.0.0:10000"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
