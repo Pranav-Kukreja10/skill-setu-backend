@@ -55,6 +55,7 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
+    'skillsetu_backend.db_keepalive.DatabaseActivityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -103,6 +104,9 @@ if not DEVELOPMENT and DATABASE_URL:
     _db_url = urllib.parse.urlparse(DATABASE_URL)
     _query_params = urllib.parse.parse_qs(_db_url.query)
     _sslmode = _query_params.get('sslmode', [os.getenv('DB_SSLMODE', 'require')])[0]
+    _is_pooler = 'pooler' in (_db_url.hostname or '')
+    # For Neon PgBouncer pooler, default CONN_MAX_AGE to 0 so Django doesn't retain dead sockets
+    _default_conn_age = '0' if _is_pooler else '60'
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
@@ -111,11 +115,16 @@ if not DEVELOPMENT and DATABASE_URL:
             'PASSWORD': urllib.parse.unquote(_db_url.password or ''),
             'HOST': _db_url.hostname,
             'PORT': str(_db_url.port or '5432'),
-            'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '600')),
+            'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', _default_conn_age)),
             'CONN_HEALTH_CHECKS': os.getenv('DB_CONN_HEALTH_CHECKS', 'True').lower() in ('true', '1'),
-            'DISABLE_SERVER_SIDE_CURSORS': os.getenv('DB_DISABLE_SERVER_SIDE_CURSORS', 'True' if 'pooler' in (_db_url.hostname or '') else 'False').lower() in ('true', '1'),
+            'DISABLE_SERVER_SIDE_CURSORS': os.getenv('DB_DISABLE_SERVER_SIDE_CURSORS', 'True' if _is_pooler else 'False').lower() in ('true', '1'),
             'OPTIONS': {
                 'sslmode': _sslmode,
+                'connect_timeout': 10,
+                'keepalives': 1,
+                'keepalives_idle': 30,
+                'keepalives_interval': 10,
+                'keepalives_count': 5,
             },
         }
     }
@@ -130,11 +139,12 @@ else:
             'PASSWORD': os.getenv('DB_PASSWORD', 'skillsetu123'),
             'HOST': _db_host,
             'PORT': os.getenv('DB_PORT', '5432'),
-            'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '0' if DEVELOPMENT else '600')),
+            'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '0')),
             'CONN_HEALTH_CHECKS': os.getenv('DB_CONN_HEALTH_CHECKS', 'True').lower() in ('true', '1'),
             'DISABLE_SERVER_SIDE_CURSORS': os.getenv('DB_DISABLE_SERVER_SIDE_CURSORS', 'False').lower() in ('true', '1'),
             'OPTIONS': {
                 'sslmode': os.getenv('DB_SSLMODE', _default_ssl),
+                'connect_timeout': 10,
             },
         }
     }

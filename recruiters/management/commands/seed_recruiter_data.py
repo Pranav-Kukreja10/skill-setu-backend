@@ -389,7 +389,7 @@ class Command(BaseCommand):
                 "registration_deadline": now + timedelta(days=15),
                 "start_date": now + timedelta(days=18),
                 "is_certified": True,
-                "branding_banner_url": "https://images.unsplash.com/photo-1558441719-8b489c63f7bc?auto=format&fit=crop&w=800&q=80"
+                "branding_banner_url": "https://images.unsplash.com/photo-1593941707882-a5bba14938c7?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Microsoft India"],

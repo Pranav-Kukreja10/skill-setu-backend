@@ -734,7 +734,8 @@ class Command(BaseCommand):
             mode=LearningProgram.Mode.ONLINE,
             registration_deadline=now + timedelta(days=20),
             start_date=now + timedelta(days=25),
-            is_certified=True
+            is_certified=True,
+            branding_banner_url="https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=800&q=80"
         )
 
         p_tata_ev = LearningProgram.objects.create(
@@ -749,7 +750,8 @@ class Command(BaseCommand):
             mode=LearningProgram.Mode.HYBRID,
             registration_deadline=now + timedelta(days=15),
             start_date=now + timedelta(days=18),
-            is_certified=True
+            is_certified=True,
+            branding_banner_url="https://images.unsplash.com/photo-1593941707882-a5bba14938c7?auto=format&fit=crop&w=800&q=80"
         )
 
         p_ms_ai = LearningProgram.objects.create(
@@ -764,7 +766,8 @@ class Command(BaseCommand):
             mode=LearningProgram.Mode.ONLINE,
             registration_deadline=now + timedelta(days=30),
             start_date=now + timedelta(days=35),
-            is_certified=True
+            is_certified=True,
+            branding_banner_url="https://images.unsplash.com/photo-1677442136019-21780ecad995?auto=format&fit=crop&w=800&q=80"
         )
 
         sch_pragati = GovernmentScheme.objects.create(
@@ -932,24 +935,16 @@ class Command(BaseCommand):
         app_rahul_google = JobApplication.objects.create(
             listing=l_google_backend,
             student=sp_rahul,
-            status=JobApplication.ApplicationStatus.OFFERED,
+            status=JobApplication.ApplicationStatus.INTERVIEW,
             match_score=0.95,
-            recruiter_notes="Candidate demonstrated perfect cognitive viva scores and mastery of distributed system trade-offs. Immediate offer approved.",
-            internship_status=JobApplication.InternshipStatus.COMPLETED,
-            mentor_name="Dr. Arvind Varma",
-            mentor_designation="Principal Distributed Systems Architect",
-            mentor_feedback="Rahul delivered planetary-scale gRPC serialization drivers that decreased latency by 34%. Exemplary engineering discipline.",
-            mentor_rating=5.0,
-            completion_certificate_url="https://skillsetu.cert.in/verify/GOOGLE-INTERN-2024-9841",
-            weekly_progress_logs=[
-                {"week": 1, "milestone": "Dev containerization and cluster topology setup", "hours": 40},
-                {"week": 2, "milestone": "Profiled serialization bottlenecks in legacy pipeline", "hours": 42},
-                {"week": 3, "milestone": "Designed zero-copy streaming protobuf contracts", "hours": 40},
-                {"week": 4, "milestone": "Implemented high-throughput C++ memory mapped ring buffers", "hours": 45},
-                {"week": 5, "milestone": "Stress-tested microservices under 25,000 req/sec benchmark", "hours": 40},
-                {"week": 6, "milestone": "Configured Prometheus telemetry and alerting dashboards", "hours": 40},
-                {"week": 7, "milestone": "Staging canary validation with 34% p99 latency reduction", "hours": 40},
-                {"week": 8, "milestone": "Production release, architecture spec handover and demo", "hours": 40}
+            interview_date=now + timedelta(days=4, hours=4),
+            recruiter_notes="Round 2 Technical Architecture & Distributed Systems interview scheduled with Google Systems Engineering team.",
+            internship_status=JobApplication.InternshipStatus.NOT_STARTED,
+            status_history=[
+                {"status": "APPLIED", "timestamp": (now - timedelta(days=10)).isoformat(), "note": "Applied directly with verified skills matrix."},
+                {"status": "UNDER_REVIEW", "timestamp": (now - timedelta(days=7)).isoformat(), "note": "Passed initial resume screening."},
+                {"status": "SHORTLISTED", "timestamp": (now - timedelta(days=4)).isoformat(), "note": "Shortlisted based on 95% match and verified skills."},
+                {"status": "INTERVIEW", "timestamp": (now - timedelta(days=1)).isoformat(), "interview_date": (now + timedelta(days=4, hours=4)).isoformat(), "note": "Round 2 Technical Architecture & Distributed Systems interview scheduled with Google Systems Engineering team."}
             ]
         )
 
@@ -972,9 +967,9 @@ class Command(BaseCommand):
 
         Notification.objects.create(
             user=u_rahul,
-            title="Official Offer Extended: Google India",
-            message="Congratulations Rahul! Google India has extended an official offer for the Backend Systems Engineer position.",
-            notification_type=Notification.NotificationType.STATUS_CHANGE,
+            title="Interview Scheduled: Google India",
+            message="Your Round 2 Technical Architecture interview for Backend Systems Engineer is scheduled for Friday at 11:00 AM IST.",
+            notification_type=Notification.NotificationType.INTERVIEW_SCHEDULED,
             related_application_id=app_rahul_google.id,
             related_listing_id=l_google_backend.id,
             is_read=False
@@ -987,14 +982,6 @@ class Command(BaseCommand):
             related_application_id=app_rahul_tata.id,
             related_listing_id=l_tata_robotics.id,
             is_read=False
-        )
-        Notification.objects.create(
-            user=u_rahul,
-            title="Supervisor Evaluation Completed",
-            message="Dr. Arvind Varma has awarded you a 5.0 Star evaluation rating with verified completion certificate issued to your Digital Portfolio.",
-            notification_type=Notification.NotificationType.APPLICATION_REVIEW,
-            related_application_id=app_rahul_google.id,
-            is_read=True
         )
 
         p_google_k8s.enrolled_students.add(sp_rahul)
