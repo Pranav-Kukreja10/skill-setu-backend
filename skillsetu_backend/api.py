@@ -125,3 +125,46 @@ api.add_router("/applications", applications_router)
 api.add_router("/programs", programs_router)
 api.add_router("/placement", placement_router)
 api.add_router("/institutions", institutions_router)
+
+
+# -------------------------------------------------------------------------
+# System Uptime & Database Health Endpoints
+# -------------------------------------------------------------------------
+
+@api.get("/ping", auth=None, tags=["System"])
+def uptime_ping(request):
+    """
+    Lightweight zero-DB endpoint for external uptime monitors (e.g., cron-job.org).
+    Keeps Render web service awake 24/7 without consuming Neon database compute hours.
+    """
+    return {
+        "status": "ok",
+        "service": "skillsetu-backend",
+        "render_alive": True,
+        "message": "Render web service is warm."
+    }
+
+
+@api.get("/health", auth=None, tags=["System"])
+def system_health(request):
+    """
+    Diagnostic health check endpoint: runs an active DB ping, returns query latency,
+    and reports the current Neon keep-alive evaluation window status.
+    """
+    from django.conf import settings
+    from skillsetu_backend.db_keepalive import ping_database, get_window_status
+
+    db_ok, latency_ms, detail = ping_database()
+    window_status = get_window_status()
+
+    return {
+        "status": "healthy" if db_ok else "degraded",
+        "database": {
+            "status": "connected" if db_ok else "error",
+            "latency_ms": latency_ms,
+            "detail": detail
+        },
+        "neon_keepalive": window_status,
+        "environment": "development" if settings.DEVELOPMENT else "production"
+    }
+

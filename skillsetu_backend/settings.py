@@ -16,11 +16,14 @@ from dotenv import load_dotenv
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load local environment files
-load_dotenv(BASE_DIR / '.env', override=True)
+# Load local environment files (.env will not override real environment variables like on Render)
+load_dotenv(BASE_DIR / '.env', override=False)
+
+# Environment Mode Toggle (Set DEVELOPMENT=True in .env for local machine dev, False for production)
+DEVELOPMENT = os.getenv('DEVELOPMENT', 'False').lower() in ('true', '1')
 
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-0)m*j8j!5hdlk6f^18pa*3(6zj^s0#!ubg3fp9!!o(tg_$41pr')
-DEBUG = os.getenv('DEBUG', 'False').lower() in ('true', '1')
+DEBUG = os.getenv('DEBUG', 'True' if DEVELOPMENT else 'False').lower() in ('true', '1')
 
 _allowed_hosts_env = os.getenv('ALLOWED_HOSTS', '*')
 ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_env.split(',') if h.strip()]
@@ -52,6 +55,7 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
+    'skillsetu_backend.db_keepalive.DatabaseActivityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -91,13 +95,18 @@ AUTH_USER_MODEL = 'accounts.User'
 #     }
 # }
 
-# PostgreSQL Database Configuration (Supports local, Neon, and cloud providers via DATABASE_URL or individual DB_* env vars)
+# PostgreSQL Database Configuration
+# - DEVELOPMENT=True  -> Uses local PostgreSQL database (DB_HOST, DB_NAME, etc.)
+# - DEVELOPMENT=False -> Uses Neon Cloud PostgreSQL (DATABASE_URL)
 DATABASE_URL = os.getenv('DATABASE_URL')
-if DATABASE_URL:
+if not DEVELOPMENT and DATABASE_URL:
     import urllib.parse
     _db_url = urllib.parse.urlparse(DATABASE_URL)
     _query_params = urllib.parse.parse_qs(_db_url.query)
     _sslmode = _query_params.get('sslmode', [os.getenv('DB_SSLMODE', 'require')])[0]
+    _is_pooler = 'pooler' in (_db_url.hostname or '')
+    # For Neon PgBouncer pooler, default CONN_MAX_AGE to 0 so Django doesn't retain dead sockets
+    _default_conn_age = '0' if _is_pooler else '60'
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
@@ -106,11 +115,16 @@ if DATABASE_URL:
             'PASSWORD': urllib.parse.unquote(_db_url.password or ''),
             'HOST': _db_url.hostname,
             'PORT': str(_db_url.port or '5432'),
-            'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '600')),
+            'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', _default_conn_age)),
             'CONN_HEALTH_CHECKS': os.getenv('DB_CONN_HEALTH_CHECKS', 'True').lower() in ('true', '1'),
-            'DISABLE_SERVER_SIDE_CURSORS': os.getenv('DB_DISABLE_SERVER_SIDE_CURSORS', 'True' if 'pooler' in (_db_url.hostname or '') else 'False').lower() in ('true', '1'),
+            'DISABLE_SERVER_SIDE_CURSORS': os.getenv('DB_DISABLE_SERVER_SIDE_CURSORS', 'True' if _is_pooler else 'False').lower() in ('true', '1'),
             'OPTIONS': {
                 'sslmode': _sslmode,
+                'connect_timeout': 10,
+                'keepalives': 1,
+                'keepalives_idle': 30,
+                'keepalives_interval': 10,
+                'keepalives_count': 5,
             },
         }
     }
@@ -121,15 +135,16 @@ else:
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
             'NAME': os.getenv('DB_NAME', 'skillsetu_db'),
-            'USER': os.getenv('DB_USER', 'postgres'),
-            'PASSWORD': os.getenv('DB_PASSWORD', ''),
+            'USER': os.getenv('DB_USER', 'skillsetu_user'),
+            'PASSWORD': os.getenv('DB_PASSWORD', 'skillsetu123'),
             'HOST': _db_host,
             'PORT': os.getenv('DB_PORT', '5432'),
-            'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '600')),
+            'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '0')),
             'CONN_HEALTH_CHECKS': os.getenv('DB_CONN_HEALTH_CHECKS', 'True').lower() in ('true', '1'),
             'DISABLE_SERVER_SIDE_CURSORS': os.getenv('DB_DISABLE_SERVER_SIDE_CURSORS', 'False').lower() in ('true', '1'),
             'OPTIONS': {
                 'sslmode': os.getenv('DB_SSLMODE', _default_ssl),
+                'connect_timeout': 10,
             },
         }
     }

@@ -141,7 +141,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=20),
                 "start_date": now + timedelta(days=25),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Microsoft India"],
@@ -155,7 +156,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=15),
                 "start_date": now + timedelta(days=20),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1633356122544-f134324a6cee?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Microsoft India"],
@@ -169,7 +171,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=30),
                 "start_date": now + timedelta(days=35),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1677442136019-21780ecad995?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Zerodha Broking"],
@@ -183,7 +186,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=18),
                 "start_date": now + timedelta(days=22),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Deloitte India"],
@@ -197,7 +201,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=21),
                 "start_date": now + timedelta(days=26),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Morgan Stanley"],
@@ -211,7 +216,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.HYBRID,
                 "registration_deadline": now + timedelta(days=14),
                 "start_date": now + timedelta(days=19),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1460925895917-afdab827c52f?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Deloitte India"],
@@ -225,7 +231,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=25),
                 "start_date": now + timedelta(days=29),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1554224154-26032ffc0d07?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Zerodha Broking"],
@@ -239,7 +246,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=10),
                 "start_date": now + timedelta(days=14),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["McKinsey & Company"],
@@ -253,7 +261,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=16),
                 "start_date": now + timedelta(days=21),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1552664730-d307ca884978?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["McKinsey & Company"],
@@ -267,7 +276,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.HYBRID,
                 "registration_deadline": now + timedelta(days=12),
                 "start_date": now + timedelta(days=17),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1531403009284-440f080d1e12?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Tata Motors"],
@@ -281,7 +291,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.HYBRID,
                 "registration_deadline": now + timedelta(days=19),
                 "start_date": now + timedelta(days=24),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Microsoft India"],
@@ -295,7 +306,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=22),
                 "start_date": now + timedelta(days=27),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Adobe India"],
@@ -309,7 +321,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=17),
                 "start_date": now + timedelta(days=21),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1581291518857-4e27b48ff24e?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Adobe India"],
@@ -323,7 +336,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=14),
                 "start_date": now + timedelta(days=18),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1586717791821-3f44a563fa4c?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Microsoft India"],
@@ -337,7 +351,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=24),
                 "start_date": now + timedelta(days=28),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1573164713988-8665fc963095?auto=format&fit=crop&w=800&q=80"
             },
             {
                 "company": companies["Adobe India"],
@@ -351,7 +366,8 @@ class Command(BaseCommand):
                 "mode": LearningProgram.Mode.ONLINE,
                 "registration_deadline": now + timedelta(days=15),
                 "start_date": now + timedelta(days=20),
-                "is_certified": True
+                "is_certified": True,
+                "branding_banner_url": "https://images.unsplash.com/photo-1507238691740-187a5b1d37b8?auto=format&fit=crop&w=800&q=80"
             }
         ]
 
